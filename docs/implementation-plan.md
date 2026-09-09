@@ -1,6 +1,6 @@
 # Implementation plan
 
-Chưa triển khai code. Thực hiện lần lượt bốn bước; không tạo trước bộ khung cho các khả năng chưa dùng.
+Đã triển khai luồng fixture Python/SQLite cho bước 2–3; xem [runtime](runtime.md). Spike SharePoint thật và pilot còn chờ tenant. Thực hiện lần lượt bốn bước; không tạo trước bộ khung cho các khả năng chưa dùng.
 
 Ưu tiên một luồng nhỏ chạy được. Ca publish không rõ kết quả được dừng để kiểm tra thủ công; chưa xây cơ chế phục hồi tự động tổng quát.
 

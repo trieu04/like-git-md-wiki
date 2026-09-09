@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wiki · Đóng góp và Review</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script defer src="/app.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    :root { --pico-font-size: 95%; }
+    body { margin: 0; } [x-cloak] { display:none!important; }
+    .layout { display:grid; grid-template-columns:16rem minmax(0,1fr); min-height:100vh; }
+    .sidebar { display:flex; flex-direction:column; padding:1.5rem 1rem; border-right:1px solid var(--pico-muted-border-color); overflow-y:auto; max-height:100vh; position:sticky; top:0; }
+    .sidebar button { width:100%; text-align:left; margin:.25rem 0; }
+    .sidebar h6 { margin:1.5rem 0 .5rem; }
+    .wiki-navigation { margin-top:auto; padding-top:1rem; }
+    .wiki-navigation h6 { margin-top:0; }
+    .sidebar .tree { display:grid; gap:.08rem; }
+    .sidebar .tree-item,
+    .sidebar .tree-folder { box-sizing:border-box; min-height:2rem; border:0; border-radius:var(--pico-border-radius); background:transparent; box-shadow:none; color:var(--pico-color); font-size:.86rem; line-height:1.3; }
+    .sidebar .tree-item { display:block; padding:.38rem .45rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-decoration:none; }
+    .sidebar .tree-folder { display:flex; align-items:center; width:100%; margin:0; padding:.36rem .45rem; color:var(--pico-muted-color); font-weight:600; text-align:left; white-space:nowrap; }
+    .sidebar .tree-item:hover,
+    .sidebar .tree-item:focus-visible,
+    .sidebar .tree-folder:hover,
+    .sidebar .tree-folder:focus-visible { background:var(--pico-muted-border-color); color:var(--pico-color); }
+    .sidebar .tree-item.is-selected { background:var(--pico-primary-background); color:var(--pico-primary-inverse); font-weight:600; }
+    .sidebar .tree-item.is-selected:hover,
+    .sidebar .tree-item.is-selected:focus-visible { background:var(--pico-primary-hover-background); color:var(--pico-primary-inverse); }
+    .sidebar .contribution-item { padding:.45rem .5rem; font-size:.85rem; }
+    .sidebar .contribution-item.is-selected { border-color:var(--pico-primary-background); background:var(--pico-primary-background); color:var(--pico-primary-inverse); }
+    .sidebar .contribution-item.is-selected small { color:inherit; }
+    .sidebar .skill-download { display:block; width:100%; margin:.25rem 0; text-align:left; }
+    main { padding:2rem; max-width:78rem; width:100%; }
+    header,.toolbar { display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .toolbar { justify-content:flex-start; }
+    .toolbar button { margin:0; width:auto; }
+    .muted { color:var(--pico-muted-color); font-size:.9rem; }
+    .badge { display:inline-block; padding:.15rem .6rem; border-radius:1rem; background:var(--pico-muted-border-color); }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:32rem; }
+    .markdown-frame { margin-top:1rem; padding:1.25rem 1.5rem; border:1px solid var(--pico-muted-border-color); border-radius:var(--pico-border-radius); background:var(--pico-card-background-color); box-shadow:var(--pico-card-box-shadow); overflow-wrap:anywhere; }
+    .markdown-frame > :first-child { margin-top:0; }
+    .markdown-frame > :last-child { margin-bottom:0; }
+    .markdown-frame pre { max-height:none; }
+    textarea { font-family:inherit; } .filebody { font-family:monospace; }
+    .flow { border-left:3px solid var(--pico-primary); padding-left:1rem; }
+    .error { color:var(--pico-del-color); }
+    .queue { overflow-x:auto; }
+    @media(max-width:760px) { .layout {grid-template-columns:1fr;} .sidebar {border-right:0;border-bottom:1px solid var(--pico-muted-border-color);} main {padding:1rem;} }
+  </style>
+</head>
+<body x-data="wikiApp()">
+<div class="layout">
+  <aside class="sidebar">
+    <strong>Markdown Wiki</strong>
+    <h6>Đóng góp</h6>
+    <button :class="view === 'contribute' ? '' : 'outline'" @click="startContribution()">Tạo file đóng góp</button>
+    <h6>Reviewer</h6>
+    <button :class="view === 'review' ? '' : 'outline'" @click="view='review'; clear(); refresh()">Review contribution</button>
+    <small x-show="!contributions.length" class="muted">Chưa có contribution.</small>
+    <template x-for="item in contributions" :key="item.id">
+      <button class="contribution-item outline" :class="contribution?.id === item.id ? 'is-selected' : ''" @click="openContribution(item.id)">
+        <span x-text="item.id"></span><br><small x-text="item.target + ' · ' + stateLabel(item.state)"></small>
+      </button>
+    </template>
+    <h6>Skill</h6>
+    <button class="secondary outline" @click="openSkill('contributor')">Skill Contributor</button>
+    <button class="secondary outline" @click="openSkill('reviewer')">Skill Reviewer</button>
+    <small x-text="config.storage"></small>
+    <nav class="wiki-navigation" aria-label="Wiki files">
+      <h6>Wiki files</h6>
+      <p x-show="!wikiPaths.length" class="muted">Chưa có file Markdown.</p>
+      <div class="tree" role="tree">
+        <template x-for="row in visibleWikiTree" :key="row.key">
+          <div role="none">
+            <template x-if="row.type === 'folder'">
+              <button class="tree-folder" type="button" role="treeitem"
+                :aria-expanded="isFolderExpanded(row.path)" :style="`padding-left:${row.depth * .85 + .45}rem`"
+                @click="toggleFolder(row.path)" x-text="(isFolderExpanded(row.path) ? '▾ ' : '▸ ') + row.name"></button>
+            </template>
+            <template x-if="row.type === 'file'">
+              <a href="#" class="tree-item" role="treeitem"
+                :class="selectedPath === row.path ? 'is-selected' : ''" :aria-current="selectedPath === row.path ? 'page' : null"
+                :style="`padding-left:${row.depth * .85 + .8}rem`" :title="row.path" @click.prevent="openDocument(row.path)" x-text="row.name"></a>
+            </template>
+          </div>
+        </template>
+      </div>
+    </nav>
+  </aside>
+  <main x-cloak>
+    <p x-show="notice" role="alert" :class="error ? 'error' : ''" x-text="notice"></p>
+
+    <section x-show="view === 'document'">
+      <header><div><h2 x-text="selectedPath"></h2><p class="muted">File Markdown hiện đang được xuất bản trong wiki.</p></div><button class="outline" @click="startContribution()">Tạo đóng góp</button></header>
+      <article class="markdown-frame" x-html="markdownHtml(documentContent)"></article>
+    </section>
+
+    <section x-show="view === 'contribute'">
+      <h2>Đóng góp</h2>
+      <form @submit.prevent="createFile()" @input="generated=null">
+        <div class="grid">
+          <label>Mã đóng góp<input x-model.trim="form.id" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,79}" placeholder="update-policy-1"></label>
+          <label>Tác giả<input x-model.trim="form.submitter" required placeholder="author-agent"></label>
+        </div>
+        <label>Lý do và căn cứ<textarea x-model="form.reason" required rows="3" placeholder="Phát biểu nào cần đổi? Nguồn nào hỗ trợ?"></textarea></label>
+        <label>Phạm vi áp dụng và tác động
+          <small>Mỗi dòng: <code>file | version | tác động</code>. Dòng đầu là file chính được sửa; các dòng sau là file liên quan.</small>
+          <textarea class="filebody" x-model="form.scopeFiles" required rows="4" placeholder="policy.md | 20260908-1 | Cập nhật thời hạn&#10;docs/related.md | 20260908-1 | Cần đồng bộ hướng dẫn"></textarea>
+          <small x-show="selectedReference">File và phiên bản ở dòng đầu được điền khi chọn Tạo đóng góp từ wiki. Bổ sung tác động cho dòng này.</small>
+          <small x-show="!selectedReference">Chọn file từ cây wiki rồi bấm Tạo đóng góp để điền dòng đầu.</small>
+        </label>
+        <label>Sources <small>Mỗi dòng: <code>file | version</code></small><textarea class="filebody" x-model="form.sourceFiles" rows="4" placeholder="sources/handbook.md | 20260908-2"></textarea></label>
+        <label>Thao tác nội dung (không bắt buộc)<select x-model="form.editMode"><option value="">Nhập toàn bộ nội dung Markdown mới</option><option value="replace">Thay thế một đoạn</option><option value="append">Thêm vào cuối file</option></select></label>
+        <label x-show="form.editMode === 'replace'">Đoạn cần thay thế<textarea class="filebody" x-model="form.before" rows="5" spellcheck="false"></textarea></label>
+        <label x-show="form.editMode === 'replace'">Nội dung thay thế<textarea class="filebody" x-model="form.change" rows="5" spellcheck="false"></textarea></label>
+        <label x-show="form.editMode === 'append'">Nội dung cần thêm<textarea class="filebody" x-model="form.change" rows="6" spellcheck="false"></textarea></label>
+        <label x-show="!form.editMode">Toàn bộ nội dung Markdown mới<textarea class="filebody" x-model="form.content" rows="12" spellcheck="false"></textarea></label>
+        <button type="submit" :disabled="busy" :aria-busy="busy">Tạo file Markdown</button>
+      </form>
+      <article x-show="generated">
+        <h3>File cho reviewer</h3>
+        <p x-text="generated?.name"></p>
+        <button @click="downloadFile()">Tải file đóng góp</button>
+      </article>
+    </section>
+
+    <section x-show="view === 'review'">
+      <h2>Reviewer</h2>
+      <details><summary>Tiếp nhận file đóng góp</summary>
+        <form @submit.prevent="importFile()">
+          <label>File contribution.md<input type="file" accept=".md,text/markdown,text/plain" @change="loadImport($event)" required></label>
+          <label>Tác giả đã xác minh<input x-model.trim="importAuthor" required placeholder="author-agent"></label>
+          <button type="submit" :disabled="busy || !importText" :aria-busy="busy">Tiếp nhận file</button>
+        </form>
+      </details>
+      <form @submit.prevent="openContribution(contributionId)">
+        <label>Mã contribution<input x-model.trim="contributionId" required placeholder="update-policy-1"></label>
+        <button :disabled="busy">Đọc contribution và artifact</button>
+      </form>
+      <div class="toolbar"><h3 style="margin:0">Đóng góp đã tiếp nhận</h3><button class="outline" @click="refresh()">Làm mới</button></div>
+      <p x-show="!contributions.length" class="muted">Chưa có đóng góp.</p>
+      <div class="queue" x-show="contributions.length"><table><thead><tr><th>Mã</th><th>Tài liệu</th><th>Tác giả</th><th>Trạng thái</th></tr></thead><tbody>
+        <template x-for="item in contributions" :key="item.id"><tr><td><a href="#" @click.prevent="openContribution(item.id)" x-text="item.id"></a></td><td x-text="item.target"></td><td x-text="item.submitter"></td><td x-text="stateLabel(item.state)"></td></tr></template>
+      </tbody></table></div>
+      <template x-if="contribution"><article>
+        <header><h3 x-text="contribution.id"></h3><span class="badge" x-text="stateLabel(contribution.state)"></span></header>
+        <p><strong>Tài liệu:</strong> <span x-text="contribution.target"></span> · <strong>Tác giả:</strong> <span x-text="contribution.submitter"></span></p>
+        <p style="white-space:pre-wrap" x-text="contribution.reason"></p>
+        <div x-show="contribution.scope_impact?.length"><h4>Phạm vi và tác động</h4><table><thead><tr><th>File</th><th>Version</th><th>Tác động</th></tr></thead><tbody><template x-for="item in contribution.scope_impact" :key="item.path"><tr><td x-text="item.path"></td><td x-text="item.version"></td><td x-text="item.impact"></td></tr></template></tbody></table></div>
+        <div x-show="contribution.source_references?.length"><h4>Sources</h4><table><thead><tr><th>File</th><th>Version</th></tr></thead><tbody><template x-for="item in contribution.source_references" :key="item.path"><tr><td x-text="item.path"></td><td x-text="item.version"></td></tr></template></tbody></table></div>
+        <p x-show="contribution.sources.length"><strong>Trích dẫn cũ:</strong> <span x-text="contribution.sources.join(', ')"></span></p>
+        <h4>Ngữ cảnh đã dùng</h4><p x-text="contextLabel(contribution.context_status.status)"></p>
+        <template x-for="doc in contribution.context_documents" :key="doc.path"><details><summary x-text="doc.path + ' · ' + (doc.version || 'tạo mới')"></summary><small x-text="doc.hash"></small><p x-show="doc.content === null" class="muted">(Chưa tồn tại)</p><article x-show="doc.content !== null" class="markdown-frame" x-html="markdownHtml(doc.content)"></article></details></template>
+        <template x-for="change in contribution.context_status.changes" :key="change.path"><p class="error" x-text="change.path + ': ' + (change.expected.version || 'chưa có') + ' → ' + (change.current.version || 'không còn')"></p></template>
+        <template x-if="contribution.knowledge_change"><section><h4>Thay đổi kiến thức do tác giả khai báo</h4><div class="grid"><div><strong>Trước</strong><article class="markdown-frame" x-html="markdownHtml(contribution.knowledge_change.before)"></article></div><div><strong>Sau</strong><article class="markdown-frame" x-html="markdownHtml(contribution.knowledge_change.after)"></article></div></div><p x-text="contribution.knowledge_change.scope"></p></section></template>
+        <details><summary>Bản nền</summary><article class="markdown-frame" x-html="markdownHtml(contribution.base)"></article></details>
+        <details open><summary>Nội dung đóng góp</summary><article class="markdown-frame" x-html="markdownHtml(contribution.proposed)"></article></details>
+        <details><summary>Text diff</summary><pre x-text="contribution.diff"></pre></details>
+        <details open><summary>Artifact chính xác để review</summary><pre x-text="contribution.artifact || '(Chưa có artifact)' "></pre></details>
+        <form x-show="contribution.can_review" @submit.prevent="decide()">
+          <p>Reviewer: <strong x-text="config.reviewer"></strong></p>
+          <label>Quyết định<select x-model="decision"><option value="">Chọn sau khi review</option><option value="approve">Duyệt</option><option value="reject">Từ chối</option></select></label>
+          <label>Lý do quyết định<textarea x-model="decisionReason" rows="3" required></textarea></label>
+          <button :disabled="busy || !decision || (decision === 'approve' && contribution.context_status.status === 'stale')" :aria-busy="busy">Ghi quyết định</button>
+        </form>
+        <p x-show="contribution.state === 'pending' && !contribution.can_review">Tác giả không thể tự review đóng góp của mình.</p>
+        <div x-show="contribution.state === 'approved'"><p>Xuất bản đúng artifact đã duyệt; kiểm tra lại bản nền và nguồn trước khi ghi.</p><button @click="publish()" :disabled="busy" :aria-busy="busy">Xuất bản</button></div>
+        <p x-show="contribution.decision" x-text="contribution.decision?.reason"></p>
+        <p class="error" x-text="contribution.error"></p>
+      </article></template>
+    </section>
+
+    <section x-show="view === 'skill'">
+      <header>
+        <div><h2 x-text="skillRole === 'contributor' ? 'Skill · Contributor' : 'Skill · Reviewer'"></h2><p class="muted">Hướng dẫn độc lập dành cho agent.</p></div>
+        <a :href="'/api/skill/' + skillRole" class="outline" role="button" download>Tải skill</a>
+      </header>
+      <article class="markdown-frame" x-html="markdownHtml(skillContent)"></article>
+    </section>
+
+  </main>
+</div>
+</body>
+</html>

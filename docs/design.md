@@ -2,9 +2,9 @@
 
 ## Phạm vi
 
-Chứng minh một luồng: **gửi thay đổi → người phụ trách review → xuất bản đúng bản đã duyệt → truy lại và sửa sai**. Repo chưa có runtime.
+Chứng minh một luồng: **gửi thay đổi → người phụ trách review → xuất bản đúng bản đã duyệt → truy lại và sửa sai**. Runtime fixture đã có; xem [hướng dẫn](runtime.md). SharePoint thật chưa được kiểm chứng.
 
-Một folder Markdown trên SharePoint, một người phụ trách pilot, một worker trên một host. Mỗi proposal sửa hoặc thêm một file. Chưa rename/delete, attachment, nhiều file hoặc phân quyền theo nhiều domain. Nhân viên/agent gửi proposal; chỉ worker ghi wiki chính thức. Quyền ghi và xác thực phải kiểm chứng trước pilot.
+Một folder Markdown trên SharePoint, một reviewer cấu hình (người hoặc agent), một worker trên một host. Mỗi proposal sửa hoặc thêm một file. Chưa rename/delete, attachment, nhiều file hoặc phân quyền theo nhiều domain. Nhân viên/agent gửi proposal; chỉ worker ghi wiki chính thức. Quyền ghi và xác thực phải kiểm chứng trước pilot.
 
 Ưu tiên luồng nhỏ chạy được. Trường hợp hiếm hoặc kết quả không rõ có thể dừng để người phụ trách xử lý; chưa xây hệ thống phục hồi tự động tổng quát.
 
@@ -31,7 +31,7 @@ Một chương trình Python với các lệnh `scan`, `review`, `publish`, `sta
 
 Một process lock dùng chung cho các lệnh thay đổi trạng thái. Không giữ lock trong lúc chờ người review; khi xác nhận phải kiểm tra lại trạng thái. CLI review chạy trong môi trường tin cậy; contributor không được sửa DB/bundle hoặc chạy tùy ý với quyền worker.
 
-Không có web server, queue service hay workflow framework. Tách SharePoint HTTP, lưu trạng thái và workflow vừa đủ để kiểm thử; chọn thư viện sau spike.
+Web UI/API localhost hỗ trợ nhận file, đọc contribution cùng artifact, review và publish; chưa có xác thực cho truy cập mạng. Agent đóng góp bằng file/bundle. Không có queue service hay workflow framework.
 
 ## Review và xuất bản
 
@@ -63,3 +63,17 @@ MVP chưa tự theo dõi nguồn đổi, cảnh báo quá hạn hoặc issue. Ng
 - Hash chống nhầm phiên bản, không thay thế xác thực và quyền ghi.
 
 Chưa có atomic update nhiều file, graph snapshot hoặc temporal query. Ngữ cảnh ngoài bản/nguồn đã ghi nhận không được bảo đảm tái lập. Chỉ mở rộng khi pilot cho thấy vấn đề cụ thể cần giải quyết.
+
+## Đóng góp từ nội dung
+
+Agent tìm kiếm/đọc file trực tiếp, lấy phiên bản qua CLI và soạn bundle. UI tạo file `wiki-contribution-v3` cho reviewer tiếp nhận: phạm vi/tác động là `file | version | impact`, sources là `file | version`. Proposed content hiển thị trước, Base content sau, đều là Markdown thuần; các break có Boundary riêng không xuất hiện trong nội dung để phân biệt với dấu phân cách thông thường. Bộ đọc chỉ nhận file Markdown v3. Worker tra hash từ snapshot đã đăng ký theo cặp file/version rồi ghim ngữ cảnh nội bộ; hash payload vẫn được kiểm tra trong metadata. UI có thể dựng nội dung cuối bằng thay thế duy nhất hoặc thêm cuối file. Manifest có thể chứa `knowledge_change` gồm `before`, `after`, `scope`; kiểm tra phép thay thế duy nhất tái tạo đúng toàn bộ proposed (sau khi loại khối review cũ). Metadata này thuộc bundle hash, giữ nguyên qua review và lịch sử.
+
+Knowledge diff này do tác giả khai báo, không phải suy luận ngữ nghĩa tự động. Chưa có mô hình AI, phát hiện mâu thuẫn, kiểm chứng nguồn hay tự sửa các file liên quan. Text diff và artifact đầy đủ vẫn dùng để kiểm tra chính xác nội dung xuất bản.
+
+## Công cụ cho agent và ngữ cảnh bất biến
+
+Xem [skill theo hai vai trò](agent-workflow.md). Worker cấp phiên bản qua CLI context, tiếp nhận file/bundle qua scan hoặc form reviewer. Đọc và artifact được gộp trong `/api/contribution/ID`. Reviewer agent có thể gọi công cụ review khi được giao xử lý pending; worker chỉ thực thi quyết định hợp lệ, không suy luận thay agent hoặc tự duyệt.
+
+Manifest có thể chứa `context` gồm tham chiếu phiên bản đích và các nguồn. SQLite lưu bản chụp theo đường dẫn, mã `YYYYMMDD-N` (ngày quan sát UTC, thứ tự trong ngày của từng tài liệu), SHA-256, nội dung và thời điểm. Luồng agent bắt buộc context; các luồng cũ vẫn tương thích không context. Nguồn đổi chặn đề xuất mới và approve; đổi sau approve khiến publish chuyển stale. Reviewer vẫn có thể reject đề xuất có nguồn stale. Snapshot không bị ghi đè; history và backup giữ tham chiếu/ngữ cảnh.
+
+Kiểm tra độ mới không đánh giá độ đúng của kiến thức, không phát hiện nguồn thiếu và không bảo đảm giao dịch nguyên tử giữa nhiều nguồn với writer ngoài worker. Không có scheduler hoặc model tự động trong worker.

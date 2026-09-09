@@ -1,0 +1,5 @@
+interface:
+  display_name: "Wiki Contributor & Reviewer"
+  short_description: "Write contribution bundles and review wiki changes"
+  brand_color: "#2563EB"
+  default_prompt: "Use $wiki-knowledge-workflow to create a contribution bundle or review an assigned wiki contribution."
