@@ -78,7 +78,11 @@ class LocalFolderStorage:
         with self.lock():
             result = []
             for directory, dirs, files in os.walk(self.root, followlinks=False):
-                dirs[:] = [d for d in dirs if d != '.wiki-system' and not (Path(directory) / d).is_symlink()]
+                # Contribution files are incoming workflow artifacts, not published wiki pages.
+                # Keep them out of the document tree so an arbitrary contribution ID (for
+                # example, uppercase XX123) cannot make /api/wiki fail path validation.
+                dirs[:] = [d for d in dirs if d not in ('.wiki-system', 'contributions')
+                           and not (Path(directory) / d).is_symlink()]
                 for name in files:
                     if name.endswith('.md'):
                         relative = (Path(directory) / name).relative_to(self.root).as_posix()

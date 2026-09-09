@@ -1,79 +1,79 @@
-# Thiết kế MVP
+# MVP design
 
-## Phạm vi
+## Scope
 
-Chứng minh một luồng: **gửi thay đổi → người phụ trách review → xuất bản đúng bản đã duyệt → truy lại và sửa sai**. Runtime fixture đã có; xem [hướng dẫn](runtime.md). SharePoint thật chưa được kiểm chứng.
+Prove one workflow: **submit a change → designated reviewer reviews it → publish exactly what was approved → trace and correct mistakes**. A fixture runtime is available; see the [guide](runtime.md). Live SharePoint integration remains unverified.
 
-Một folder Markdown trên SharePoint, một reviewer cấu hình (người hoặc agent), một worker trên một host. Mỗi proposal sửa hoặc thêm một file. Chưa rename/delete, attachment, nhiều file hoặc phân quyền theo nhiều domain. Nhân viên/agent gửi proposal; chỉ worker ghi wiki chính thức. Quyền ghi và xác thực phải kiểm chứng trước pilot.
+Use one Markdown folder on SharePoint, one configured reviewer (human or agent), and one worker on one host. Each proposal changes or adds one file. Renames, deletions, attachments, multiple-file changes, and permissions across multiple domains are outside scope. Employees and agents submit proposals; only the worker writes the official wiki. Verify write permissions and authentication before the pilot.
 
-Ưu tiên luồng nhỏ chạy được. Trường hợp hiếm hoặc kết quả không rõ có thể dừng để người phụ trách xử lý; chưa xây hệ thống phục hồi tự động tổng quát.
+Prioritize a small working flow. Rare cases or uncertain outcomes may stop for operator intervention; a general automatic recovery system is not required yet.
 
-## Dữ liệu
+## Data
 
 ```text
-wiki/                       Các tài liệu đang được chia sẻ
+wiki/                       Shared documents
 proposals/<id>/
-  base.md                   Toàn bộ bản nền, bỏ qua nếu tạo mới
-  proposed.md               Nội dung mới, không kèm khối trạng thái hệ thống
-  proposal.ready.json       Manifest gửi cuối cùng
-history/<id>/               Bundle đóng băng, quyết định và kết quả xuất bản
+  base.md                   Complete base; omitted for new files
+  proposed.md               New content without the system status block
+  proposal.ready.json       Manifest submitted last
+history/<id>/               Frozen bundle, decision, and publication result
 ```
 
-Manifest gồm schema version, proposal ID, target path, base hash (null khi thêm), proposed hash, lý do và nguồn/ngữ cảnh nếu có. SHA-256 tính trên byte gốc; giữ bản nền để truy lại nội dung. Hash bundle dùng hash nguyên byte manifest chứa các hash file; giữ nguyên manifest, không serialize lại khi kiểm chứng. Path phải nằm trong wiki; từ chối đường dẫn thoát root, tên nhập nhằng và JSON có key trùng.
+The manifest contains a schema version, proposal ID, target path, base hash (null for creation), proposed hash, reason, and sources/context when available. SHA-256 is calculated over original bytes; retain the base to reconstruct the content. The bundle hash is the hash of the exact manifest bytes containing the file hashes. Preserve the manifest rather than serializing it again during verification. Paths must remain inside the wiki; reject root escapes, ambiguous names, and duplicate JSON keys.
 
-Worker lấy người gửi từ metadata SharePoint đã xác thực gắn với bản manifest tiếp nhận, không tin trường tác giả tự khai. Quyền inbox phải ngăn người khác sửa proposal rồi mang danh người gửi cũ. Nếu agent dùng ứng dụng chung không xác định được người gửi, chỉ thử nội bộ cho đến khi có cách submit xác thực phù hợp.
+The worker obtains the submitter from authenticated SharePoint metadata bound to the ingested manifest version, not a self-declared author field. Inbox permissions must prevent someone from editing a proposal under an earlier submitter's identity. If agents share an application identity that cannot identify the submitter, restrict use to internal experiments until an appropriate authenticated submission mechanism exists.
 
-Proposal bất biến sau tiếp nhận; sửa tạo ID mới. Cùng ID và bundle là retry, khác bundle là lỗi. Suffix chỉ là tín hiệu: worker phải tải đủ, kiểm tra hash và lưu bản đóng băng bền vững trước khi cho review.
+Proposals are immutable after ingestion; revisions need a new ID. The same ID and bundle is a retry; a different bundle is an error. A suffix is only a signal: the worker must download everything, verify hashes, and durably freeze the bundle before review.
 
 ## Runtime
 
-Một chương trình Python với các lệnh `scan`, `review`, `publish`, `status`; scan/publish chạy định kỳ bằng cron. SQLite và bundle đóng băng nằm trên durable volume riêng, không trong SharePoint sync. SQLite giữ trạng thái/tiến độ; history giữ bản lưu để truy vết. Lưu nội dung bền vững trước khi DB tham chiếu đến nó.
+A Python program provides `scan`, `review`, `publish`, and `status`; cron periodically runs scan/publish. SQLite and frozen bundles live on a separate durable volume, outside SharePoint sync. SQLite tracks state/progress; history retains the audit record. Persist content before allowing database references to it.
 
-Một process lock dùng chung cho các lệnh thay đổi trạng thái. Không giữ lock trong lúc chờ người review; khi xác nhận phải kiểm tra lại trạng thái. CLI review chạy trong môi trường tin cậy; contributor không được sửa DB/bundle hoặc chạy tùy ý với quyền worker.
+State-changing commands share a process lock. Do not hold it while waiting for review; recheck state when confirming a decision. CLI review runs in a trusted environment. Contributors must not modify the database/bundles or execute arbitrary commands as the worker.
 
-Web UI/API localhost hỗ trợ nhận file, đọc contribution cùng artifact, review và publish; chưa có xác thực cho truy cập mạng. Agent đóng góp bằng file/bundle. Không có queue service hay workflow framework.
+The localhost web UI/API supports file ingestion, reading contributions with artifacts, review, and publication. Network access authentication is not implemented. Agents contribute files or bundles. No queue service or workflow framework is required.
 
-## Review và xuất bản
+## Review and publication
 
-1. Scan kiểm tra payload/path/hash, xác định người gửi và đóng băng bundle.
-2. Người phụ trách xem diff, lý do và nguồn qua CLI. Xác thực Microsoft 365 và kiểm tra reviewer thuộc cấu hình pilot bằng ID tài khoản, không bằng tên tự khai. Người gửi không tự duyệt; nếu chỉ có một reviewer và người đó là người gửi thì giữ chờ.
-3. Worker dựng file cuối cùng gồm nội dung và khối trạng thái, cho reviewer xem trước khi xác nhận. Lưu file này cùng bundle hash, artifact hash, reviewer, thời điểm và lý do. Publish dùng nguyên byte đã duyệt, không tạo lại metadata theo thời gian/cấu hình mới.
-4. Trước publish, kiểm tra toàn file remote khớp base hash; byte nội dung, item ID và version/ETag phải thuộc cùng một phiên bản đã được xác minh. Không ghép nội dung cũ với ETag mới từ lần đọc metadata riêng. Ghi có điều kiện theo item/ETag đó; tạo mới phải thất bại nếu path đã tồn tại. Chỉ dùng thao tác được spike chứng minh đáp ứng điều kiện; lỗi quyền/mạng không được hiểu là file không tồn tại.
-5. Lưu bundle, quyết định và bước chuẩn bị publish bền vững trước ghi remote, gồm target, artifact hash và điều kiện ghi (item/ETag hoặc tạo khi chưa tồn tại). Sau ghi, lưu kết quả remote và xác minh artifact, hoàn tất history rồi mới báo `published`. Nếu chỉ còn thiếu history thì hoàn tất ghi nhận, không upload wiki lại.
+1. Scan validates payloads, paths, and hashes, identifies the submitter, and freezes the bundle.
+2. The designated reviewer inspects the diff, reason, and sources through the CLI. Authenticate through Microsoft 365 and check the reviewer against the pilot configuration using account IDs, not self-declared names. Authors cannot approve their own work. If the only reviewer is also the author, leave the proposal pending.
+3. The worker builds the final file, including its status block, and shows it before confirmation. Retain this file with the bundle hash, artifact hash, reviewer, timestamp, and reason. Publish the exact approved bytes; do not regenerate metadata using a later time or configuration.
+4. Before publication, check the entire remote file against the base hash. Content bytes, item ID, and version/ETag must belong to the same verified version. Do not pair old content with a new ETag from a separate metadata read. Write conditionally against that item/ETag; creation must fail if the path already exists. Use only operations proven by the spike to meet these conditions. Permission and network errors must not be treated as absence.
+5. Durably store the bundle, decision, and prepared publication before writing remotely, including target, artifact hash, and write condition (item/ETag or create-only). After writing, retain the remote result, verify the artifact, and finish history before reporting `published`. If only history is incomplete, finish recording it without uploading the wiki again.
 
-Khi request timeout hoặc crash khiến không biết đã ghi hay chưa, tạm chặn mọi publish vào cùng target để kiểm tra remote/lịch sử; file khác vẫn có thể tiếp tục. Sau restart, xử lý các lần ghi dở trước khi nhận việc publish mới cho target đó. Hash trùng chỉ chứng minh nội dung, chưa đủ chứng minh lần ghi. Người phụ trách ghi bằng chứng và kết luận đã ghi hoặc chưa ghi trước khi cho tiếp tục; chưa rõ thì giữ chặn. Chưa cần tự động reconcile mọi trường hợp. Không retry ghi mù, lấy ETag mới để vượt điều kiện cũ hoặc blind rollback.
+When a timeout or crash leaves the write outcome unknown, block all publication to that target while investigating remote storage/history; other files may proceed. After restart, resolve incomplete writes before accepting new publications to that target. Matching hashes prove content equality, not that a particular operation committed. The operator records evidence and a written/not-written conclusion before unblocking; unresolved cases remain blocked. Automatic reconciliation of every case is unnecessary for now. Do not blindly retry writes, obtain a new ETag to bypass the original condition, or roll back blindly.
 
-Trạng thái tối thiểu: `pending`, `approved`, `published`, `rejected`, `stale`; bước publish, lỗi tạm thời và cờ cần kiểm tra lưu riêng. Cờ cần kiểm tra chặn publish đến khi có kết luận được ghi nhận. Nền đã đổi trước ghi thì `stale`, cần proposal mới. Kết quả ghi chưa rõ không được coi là stale hoặc published. `published` ghi nhận lần xuất bản trong lịch sử, không có nghĩa file remote mãi còn ở phiên bản đó.
+Minimum states: `pending`, `approved`, `published`, `rejected`, and `stale`. Store publication phases, transient errors, and investigation flags separately. Investigation blocks publication until a conclusion is recorded. If the base changes before writing, mark `stale` and require a new proposal. An unknown write outcome is neither stale nor published. `published` records a historical publication; it does not mean the remote file remains at that version forever.
 
-## Trạng thái người đọc và sửa sai
+## Reader status and corrections
 
-Worker thêm một khối trạng thái Markdown ở đầu file với owner, proposal ID và người/ngày review. Dùng marker dành riêng để tách khỏi nội dung; từ chối marker này trong `proposed.md`, tránh lặp khối hoặc mang nhãn review cũ sang bản mới. Base hash vẫn tính trên toàn file remote. Nhãn “phiên bản đã được review” không bảo đảm nội dung đúng tuyệt đối.
+The worker adds a Markdown status block at the beginning of the file with owner, proposal ID, and reviewer/date. Reserved markers separate it from the content. Reject these markers in `proposed.md` to prevent duplicate blocks or old approval labels in new content. The base hash still covers the entire remote file. A “reviewed version” label does not guarantee absolute correctness.
 
-Import được làm trong lần thiết lập có kiểm soát: lưu bản gốc, thêm nhãn `chưa review` có kiểm tra phiên bản và ghi nhận file đã làm để không chồng nhãn khi chạy lại. Pilot phải kiểm tra kênh đọc thực tế; folder sync/offline có thể hiển thị bản cũ.
+Import happens during controlled setup: retain originals, add `unreviewed` labels with version checks, and track processed files so retries do not stack labels. The pilot must check actual reading channels; synced/offline folders may show older versions.
 
-Phát hiện sai thì gửi proposal sửa hoặc thay bằng thông báo tạm rút nội dung; owner ưu tiên review. Khôi phục lấy phần nội dung bản cũ làm proposal mới trên bản hiện tại, dùng approval và khối trạng thái mới. Không ghi đè trực tiếp.
+When an error is found, submit a correction or a temporary withdrawal notice; the owner prioritizes its review. Restoration uses the body of an older version as a new proposal against the current base, with a new approval and status block. Never overwrite directly.
 
-MVP chưa tự theo dõi nguồn đổi, cảnh báo quá hạn hoặc issue. Người phụ trách dùng công cụ hiện có.
+The MVP does not automatically track source changes, overdue reviews, or issues. The operator uses existing tools.
 
-## Vận hành tối thiểu
+## Minimum operations
 
-- Chỉ worker ghi wiki/history; tên thư mục không tự tạo phân quyền. Pilot dùng tài liệu cùng phạm vi truy cập, không sao chép nguồn hạn chế sang wiki rộng quyền.
-- Backup SQLite nhất quán bằng backup API, kèm bundle/artifact được tham chiếu; tạm dừng ghi khi lấy bộ backup. Thử restore trước pilot, kiểm tra remote và các lần publish dở trước bật lại cron; không ghi đè remote mới bằng trạng thái backup cũ.
-- Giới hạn kích thước proposal, retry lỗi tạm thời có backoff, không ghi token vào log. Nội dung proposal là dữ liệu, không được thực thi.
-- Hash chống nhầm phiên bản, không thay thế xác thực và quyền ghi.
+- Only the worker writes wiki/history; folder names do not establish permissions. Use documents with the same access scope during the pilot, and do not copy restricted sources into a more widely accessible wiki.
+- Create a consistent SQLite backup through its backup API, including referenced bundles/artifacts; pause writes while taking the backup set. Rehearse restoration before the pilot. Check remote state and incomplete publications before restarting cron; never overwrite newer remote content with old backup state.
+- Limit proposal sizes, retry transient failures with backoff, and keep tokens out of logs. Proposal content is data and must not execute.
+- Hashes prevent version mix-ups; they do not replace authentication or write permissions.
 
-Chưa có atomic update nhiều file, graph snapshot hoặc temporal query. Ngữ cảnh ngoài bản/nguồn đã ghi nhận không được bảo đảm tái lập. Chỉ mở rộng khi pilot cho thấy vấn đề cụ thể cần giải quyết.
+Atomic multi-file updates, graph snapshots, and temporal queries are not included. Context beyond recorded bases/sources is not guaranteed to be reproducible. Expand only when the pilot reveals a concrete problem.
 
-## Đóng góp từ nội dung
+## Content contributions
 
-Agent tìm kiếm/đọc file trực tiếp, lấy phiên bản qua CLI và soạn bundle. UI tạo file `wiki-contribution-v3` cho reviewer tiếp nhận: phạm vi/tác động là `file | version | impact`, sources là `file | version`. Proposed content hiển thị trước, Base content sau, đều là Markdown thuần; các break có Boundary riêng không xuất hiện trong nội dung để phân biệt với dấu phân cách thông thường. Bộ đọc chỉ nhận file Markdown v3. Worker tra hash từ snapshot đã đăng ký theo cặp file/version rồi ghim ngữ cảnh nội bộ; hash payload vẫn được kiểm tra trong metadata. UI có thể dựng nội dung cuối bằng thay thế duy nhất hoặc thêm cuối file. Manifest có thể chứa `knowledge_change` gồm `before`, `after`, `scope`; kiểm tra phép thay thế duy nhất tái tạo đúng toàn bộ proposed (sau khi loại khối review cũ). Metadata này thuộc bundle hash, giữ nguyên qua review và lịch sử.
+Agents discover and read files directly, obtain versions through the CLI, and prepare bundles. The UI creates `wiki-contribution-v3` files for reviewer ingestion: scope/impact uses `file | version | impact`, and sources use `file | version`. Proposed content appears before Base content, both as plain Markdown. Separators use a dedicated Boundary absent from the content so ordinary separators remain unambiguous. The Markdown parser accepts only v3. The worker resolves hashes from registered file/version snapshots and pins internal context; payload hashes are still checked in metadata. The UI can construct final content with a unique replacement or an append. Manifests may include `knowledge_change` with `before`, `after`, and `scope`; validation checks that a unique replacement reproduces the complete proposed content after stripping the old review block. This metadata belongs to the bundle hash and remains intact through review and history.
 
-Knowledge diff này do tác giả khai báo, không phải suy luận ngữ nghĩa tự động. Chưa có mô hình AI, phát hiện mâu thuẫn, kiểm chứng nguồn hay tự sửa các file liên quan. Text diff và artifact đầy đủ vẫn dùng để kiểm tra chính xác nội dung xuất bản.
+This knowledge diff is author-declared, not an automatic semantic inference. There is no AI model, contradiction detection, source verification, or automatic editing of related files. The text diff and complete artifact remain necessary to inspect exactly what will be published.
 
-## Công cụ cho agent và ngữ cảnh bất biến
+## Agent tools and immutable context
 
-Xem [skill theo hai vai trò](agent-workflow.md). Worker cấp phiên bản qua CLI context, tiếp nhận file/bundle qua scan hoặc form reviewer. Đọc và artifact được gộp trong `/api/contribution/ID`. Reviewer agent có thể gọi công cụ review khi được giao xử lý pending; worker chỉ thực thi quyết định hợp lệ, không suy luận thay agent hoặc tự duyệt.
+See the [two-role skill workflow](agent-workflow.md). The worker provides versions through the context CLI and ingests files/bundles through scan or the reviewer form. `/api/contribution/ID` combines inspection and the artifact. A reviewer agent may use review tools when assigned pending work; the worker enforces valid decisions without reasoning or approving on the agent's behalf.
 
-Manifest có thể chứa `context` gồm tham chiếu phiên bản đích và các nguồn. SQLite lưu bản chụp theo đường dẫn, mã `YYYYMMDD-N` (ngày quan sát UTC, thứ tự trong ngày của từng tài liệu), SHA-256, nội dung và thời điểm. Luồng agent bắt buộc context; các luồng cũ vẫn tương thích không context. Nguồn đổi chặn đề xuất mới và approve; đổi sau approve khiến publish chuyển stale. Reviewer vẫn có thể reject đề xuất có nguồn stale. Snapshot không bị ghi đè; history và backup giữ tham chiếu/ngữ cảnh.
+A manifest may contain `context` referencing the target and source versions. SQLite stores snapshots with paths, `YYYYMMDD-N` labels (UTC observation date and per-document sequence within that day), SHA-256, content, and timestamps. Agent workflows require context; legacy workflows remain compatible without it. Source changes block new proposals and approval; changes after approval make publication stale. Reviewers may still reject proposals with stale sources. Snapshots are never overwritten; history and backups preserve references/context.
 
-Kiểm tra độ mới không đánh giá độ đúng của kiến thức, không phát hiện nguồn thiếu và không bảo đảm giao dịch nguyên tử giữa nhiều nguồn với writer ngoài worker. Không có scheduler hoặc model tự động trong worker.
+Freshness checks do not judge knowledge correctness, detect missing sources, or guarantee an atomic transaction across multiple sources with external writers. The worker has no automatic scheduler or model.

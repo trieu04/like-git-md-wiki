@@ -1,168 +1,168 @@
-# Mô hình tri thức dài hạn — tài liệu tham khảo
+# Long-term knowledge model — reference
 
-Đây là bản thiết kế trước khi thu gọn phạm vi. Không phải đặc tả Phase 1. [README](../README.md), [thiết kế](design.md) và [implementation plan](implementation-plan.md) có ưu tiên. Các mục mang tên “phase nền tảng” bên dưới chỉ ghi lại đề xuất cũ; claim graph, event sourcing, policy engine và truy vấn hai trục thời gian chưa được cam kết triển khai.
+This design predates the scope reduction. It is not the Phase 1 specification. The [README](../README.md), [design](design.md), and [implementation plan](implementation-plan.md) take precedence. Sections called “foundation phase” below record an earlier proposal; a claim graph, event sourcing, policy engine, and bitemporal queries are not implementation commitments.
 
-## Mục tiêu
+## Goal
 
-Nhiều người và nhiều AI agent cùng đóng góp vào một knowledge base dạng graph, được biểu đạt bằng tài liệu Markdown liên kết nhau trên Microsoft 365 SharePoint. Giai đoạn này chuẩn bị cấu trúc, ngữ cảnh và trách nhiệm để sau này phát hiện mâu thuẫn, đánh giá nguồn, phân xử theo domain, đánh giá quan hệ và làm sạch tri thức.
+Many people and AI agents contribute to a graph knowledge base, expressed as linked Markdown documents on Microsoft 365 SharePoint. This phase prepares structure, context, and accountability for future contradiction detection, source assessment, domain arbitration, relation assessment, and knowledge cleanup.
 
-Đây là thiết kế nền tảng để thảo luận, chưa phải hệ thống được triển khai. Git gợi ý cách giữ snapshot và đề xuất thay đổi; nó không cung cấp mô hình về sự thật, thẩm quyền hay hiệu lực của kiến thức. SharePoint cung cấp môi trường cộng tác và lưu trữ.
+This is a foundation design for discussion, not an implemented system. Git suggests ways to retain snapshots and propose changes; it supplies no model of truth, authority, or knowledge validity. SharePoint provides collaboration and storage.
 
-**Đơn vị quản lý là phát biểu và quan hệ có provenance, được đề xuất và quyết định trong ngữ cảnh cụ thể.** File là đơn vị trình bày và vận chuyển. Một file có nhiều claim; một claim có thể xuất hiện trong nhiều file.
+**The managed units are statements and relations with provenance, proposed and decided within specific contexts.** Files are presentation and transport units. One file can contain multiple claims; one claim may appear in multiple files.
 
-## Các bất biến
+## Invariants
 
-1. Danh tính ổn định khác phiên bản nội dung. Đổi tên tài liệu không đổi ID; sửa nghĩa claim tạo revision hoặc claim mới với lineage rõ ràng.
-2. Tiếp nhận contribution không đồng nghĩa chấp nhận claim. Đánh giá của agent không tự trở thành quyết định có thẩm quyền.
-3. Claim, nguồn, quan hệ, assessment và decision là những đối tượng riêng.
-4. Giữ lịch sử bất biến theo mặc định; trạng thái hiện tại được dựng từ sự kiện và quyết định. Xóa bắt buộc theo chính sách dữ liệu là ngoại lệ có audit; không hứa tái lập nội dung đã xóa.
-5. Cho phép unknown. Không tự suy ra thời gian hiệu lực, tác giả gốc, domain owner hoặc độ tin cậy.
-6. Mỗi assessment gắn với phiên bản đầu vào, phương pháp và phạm vi cụ thể. Không tự mang đánh giá cũ sang revision mới.
-7. Các claim mâu thuẫn có thể cùng tồn tại trong kho. View theo chính sách quyết định điều gì được trình bày là kiến thức đang áp dụng.
+1. Stable identity differs from content version. Renaming a document preserves its ID; changing a claim's meaning creates a revision or a new claim with explicit lineage.
+2. Ingesting a contribution does not accept its claims. An agent assessment does not automatically become an authoritative decision.
+3. Claims, sources, relations, assessments, and decisions are separate objects.
+4. History is immutable by default; current state derives from events and decisions. Mandatory deletion under data policy is an audited exception; deleted content is not promised to remain reproducible.
+5. Unknown values are allowed. Do not infer valid times, original authors, domain owners, or reliability automatically.
+6. Each assessment binds to specific input versions, methods, and scope. Do not carry old assessments into new revisions automatically.
+7. Contradictory claims may coexist in storage. Policy-based views determine what appears as currently applicable knowledge.
 
-## Mô hình khái niệm
+## Conceptual model
 
-| Đối tượng | Vai trò và dữ liệu cốt lõi |
+| Object | Role and core data |
 | --- | --- |
-| Document / Revision | ID ổn định, blob hash, path hiện tại, anchors và ánh xạ claim |
-| Claim / Revision | Phát biểu nguyên văn, ngôn ngữ, scope, điều kiện áp dụng, domain và valid time được khai báo; cấu trúc subject/predicate/object tùy chọn |
-| Source / Revision | Nguồn gốc, người/tổ chức phát hành nếu biết, URI, thời điểm truy xuất, bản lưu hoặc fingerprint, giới hạn truy cập |
-| EvidenceBinding | Claim revision → source revision, đoạn trích/locator và vai trò được khai báo: hỗ trợ, phản bác hoặc bối cảnh |
-| Relation / Revision | ID riêng, loại, chiều, endpoints, scope, provenance; endpoints là claim phải chỉ rõ revision |
-| Contribution / Revision | Ý định, delta, base snapshot, read/write sets, người gửi, agent run và lý do |
-| Assessment | Target revisions, evaluator, method/version, inputs, findings, evidence, thời gian và giới hạn |
-| Decision | Target revisions, hành động, người quyết định, domain/scope, lý do, policy revision và hiệu lực |
-| AuthorityPolicy | Domain, vai trò, quyền quyết định, ủy quyền, escalation, thời gian hiệu lực |
-| Event / Snapshot | Lịch sử ghi nhận; snapshot cố định nội dung, graph, quyết định và policy tại một mốc |
+| Document / Revision | Stable ID, blob hash, current path, anchors, and claim mappings |
+| Claim / Revision | Verbatim statement, language, scope, applicability conditions, domain, and declared valid time; optional subject/predicate/object structure |
+| Source / Revision | Origin, issuing person/organization if known, URI, retrieval time, retained copy or fingerprint, access restrictions |
+| EvidenceBinding | Claim revision → source revision, quotation/locator, and declared role: support, rebuttal, or context |
+| Relation / Revision | Own ID, type, direction, endpoints, scope, provenance; claim endpoints must specify revisions |
+| Contribution / Revision | Intent, delta, base snapshot, read/write sets, submitter, agent run, and reason |
+| Assessment | Target revisions, evaluator, method/version, inputs, findings, evidence, time, and limitations |
+| Decision | Target revisions, action, decision-maker, domain/scope, reason, policy revision, and validity |
+| AuthorityPolicy | Domain, roles, decision rights, delegation, escalation, and valid time |
+| Event / Snapshot | Recorded history; snapshots pin content, graph, decisions, and policy at a point in time |
 
-Không cần graph database ngay. Record có ID và quan hệ rõ ràng có thể nằm trong JSON; index là projection dựng lại được. ID ổn định định danh đối tượng; hash định danh nội dung revision. Hai claim giống văn bản vẫn có thể khác scope và nguồn gốc, không được tự đồng nhất bằng text hash.
+A graph database is not immediately necessary. Records with IDs and explicit relations can live in JSON; indexes are rebuildable projections. Stable IDs identify objects; hashes identify revision content. Identical claim text may still have different scope and origins, so text hashes must not automatically unify claims.
 
-## Markdown và graph
+## Markdown and the graph
 
-Markdown tiếp tục là cách con người đọc và viết; sidecar metadata giữ ID, mapping và quan hệ có cấu trúc.
+Markdown remains the human reading and authoring format; sidecar metadata stores IDs, mappings, and structured relations.
 
-- Link Markdown ban đầu chỉ là `links_to`, không tự có nghĩa `supports`, `causes` hoặc `contradicts`.
-- Mapping claim tham chiếu document revision và anchor/đoạn trích có hash. Line number chỉ phục vụ hiển thị; anchor không resolve đúng thì mapping cần kiểm tra.
-- Document revision mới không tự cập nhật claim cũ. Agent hoặc người đóng góp đề xuất mapping mới; phần chưa được phân tích mang trạng thái `unmapped`.
-- Claim extraction là một đề xuất có provenance. Import wiki cũ không tự biến mọi câu thành claim được chấp nhận.
-- Thay Markdown và sidecar trong cùng contribution; validator phát hiện mapping trỏ sai revision.
+- A Markdown link initially means only `links_to`, not `supports`, `causes`, or `contradicts`.
+- Claim mappings reference document revisions and anchors or hashed quotations. Line numbers are for display only; unresolved anchors require mapping review.
+- A new document revision does not update old claims automatically. Agents or contributors propose new mappings; unanalyzed content remains `unmapped`.
+- Claim extraction is a proposal with provenance. Importing an old wiki does not make every sentence an accepted claim.
+- Change Markdown and sidecars in the same contribution; validators detect mappings to incorrect revisions.
 
-Không ép tri thức thành bộ ba ngay lập tức. Giữ nguyên văn, qualifier và đoạn nguồn để không mất nghĩa; cấu trúc hóa có thể được bổ sung sau.
+Do not immediately force knowledge into triples. Preserve exact wording, qualifiers, and source passages to retain meaning; structure can be added later.
 
-## Provenance và thời gian
+## Provenance and time
 
-Phân biệt người gửi đã xác thực, người yêu cầu/ủy quyền nếu có, agent thực thi, người phát biểu gốc trong nguồn và người quyết định. Không gộp thành một trường `author`; người yêu cầu agent không mặc nhiên endorse đầu ra.
+Distinguish the authenticated submitter, requester/delegator if any, executing agent, original speaker in the source, and decision-maker. Do not combine them into one `author` field; requesting agent work does not automatically endorse its output.
 
-AgentRun lưu agent identity, phiên bản cấu hình/công cụ/model nếu có, input revisions, nguồn truy xuất và output hashes. Lưu chỉ dẫn phù hợp chính sách dữ liệu, không cần suy luận nội bộ. Metadata hỗ trợ truy vết, không bảo đảm tái tạo nguyên xi đầu ra mô hình.
+AgentRun records agent identity, configuration/tool/model versions when available, input revisions, retrieved sources, and output hashes. Retain instructions according to data policy, without requiring internal reasoning. Metadata supports tracing but does not guarantee exact reproduction of model output.
 
-Hai trục thời gian độc lập:
+Two independent time axes:
 
-- **Valid time:** phát biểu/quyết định áp dụng cho giai đoạn nào trong domain.
-- **Recorded time:** hệ thống ghi nhận thông tin khi nào, dùng thời gian phía dịch vụ.
+- **Valid time:** when a statement or decision applies within its domain.
+- **Recorded time:** when the system records information, using service-side time.
 
-Ngày công bố và ngày truy xuất nguồn là metadata riêng. Khoảng hiệu lực chưa biết khác khoảng mở vô hạn. Sửa sai hồi tố phải giữ lịch sử hệ thống từng biết gì. Truy vấn cần phân biệt “theo những gì biết tại ngày X” với “áp dụng cho ngày Y”.
+Source publication and retrieval dates are separate metadata. Unknown validity differs from an unbounded interval. Retroactive corrections must retain what the system previously knew. Queries must distinguish “according to what was known on date X” from “applicable on date Y.”
 
-Nếu không thể lưu nguồn vì quyền hoặc bản quyền, ghi locator/fingerprint và giới hạn tái lập. Nguồn được agent dẫn lại phải giữ chuỗi derivation nếu biết; nhiều agent lặp lại một nguồn không trở thành nhiều bằng chứng độc lập.
+If permissions or copyright prevent retaining a source, record a locator/fingerprint and reproducibility limits. Sources quoted indirectly by agents should preserve the derivation chain when known; multiple agents repeating one source are not independent evidence.
 
-## Đóng góp, đánh giá và quyết định
+## Contributions, assessments, and decisions
 
 ```text
-Người / agent -> Contribution + context snapshot
+Person / agent -> Contribution + context snapshot
                          |
-                Kiểm tra cấu trúc và quyền
+                Structure and permission checks
                          |
-                Ghi nhận đối tượng ứng viên
+                Record candidate objects
                          |
-                Assessment có bằng chứng
+                Assessment with evidence
                          |
-                Decision theo authority policy
+                Decision under authority policy
                          |
-                View theo domain và thời gian -> Wiki Markdown
+                View by domain and time -> Markdown wiki
 ```
 
-Vòng đời contribution (`submitted`, `validated`, `integrated`, `rejected`) độc lập với assessment (`pending`, `completed`, `outdated`) và disposition của claim. Claim đã được ghi nhận có thể chưa được đánh giá hoặc quyết định.
+Contribution lifecycle (`submitted`, `validated`, `integrated`, `rejected`) is independent of assessment lifecycle (`pending`, `completed`, `outdated`) and claim disposition. Recorded claims may still lack assessments or decisions.
 
-Disposition được tính theo domain/scope/time/policy: chưa có quyết định, được chấp nhận, bị tranh chấp hoặc bị rút lại. Không dùng boolean `approved` toàn cục. `archived` là trạng thái hiển thị/lưu trữ, không có nghĩa claim sai.
+Disposition is calculated by domain/scope/time/policy: undecided, accepted, disputed, or retracted. Do not use one global `approved` boolean. `archived` is a presentation/storage state, not a statement that the claim is false.
 
-AuthorityPolicy có revision. Mỗi decision tham chiếu policy có hiệu lực lúc quyết định, quyền đã xác thực và phạm vi được phép. Policy đổi không viết lại lịch sử, nhưng có thể yêu cầu review lại. Domain chồng lấn hoặc chưa có owner chuyển sang chờ phân xử; không tự chọn người quyết định cuối cùng. Agent mặc định đề xuất/đánh giá, chỉ được quyết định khi policy ủy quyền rõ ràng.
+AuthorityPolicy has revisions. Each decision references the policy effective at decision time, verified authority, and permitted scope. Policy changes do not rewrite history but may require another review. Overlapping domains or missing owners await arbitration; do not automatically select a final decision-maker. Agents propose and assess by default, and decide only with explicit policy delegation.
 
-## Chuẩn bị cho các khả năng tương lai
+## Preparing for future capabilities
 
-| Khả năng | Nền tảng giữ từ bây giờ | Chưa tự động hóa |
+| Capability | Foundation to retain now | Not automated |
 | --- | --- | --- |
-| Semantic conflict detection | Claim revisions, scope/qualifier, valid time, nguồn, snapshot; issue tham chiếu nhiều claim | Phán định và giải quyết mâu thuẫn |
-| Provenance & temporal validity | Đoạn nguồn có phiên bản, actor chain, hai trục thời gian, mức đầy đủ provenance | Suy luận nguồn đáng tin hoặc claim còn đúng |
-| Authority & accountability | Domain/policy có revision; decision có người chịu trách nhiệm, rationale và phạm vi | Tự chọn owner hoặc trao quyền |
-| Graph quality / edge evaluation | Quan hệ có kiểu/chiều/revision; assessment theo tiêu chí và evaluator | Điểm truth chung hoặc tự sửa hướng cạnh |
-| Denoising lifecycle | Lineage, dependency index, hành động merge/supersede/archive/retract có lý do | Tự xóa/hợp nhất vì giống văn bản |
+| Semantic conflict detection | Claim revisions, scope/qualifiers, valid time, sources, snapshots; issues referencing multiple claims | Adjudicating and resolving contradictions |
+| Provenance & temporal validity | Versioned source passages, actor chain, two time axes, provenance completeness | Inferring source reliability or continued claim correctness |
+| Authority & accountability | Versioned domains/policies; decisions with accountable actors, rationale, and scope | Choosing owners or granting authority |
+| Graph quality / edge evaluation | Typed, directed, versioned relations; assessments with criteria and evaluators | A universal truth score or automatic edge-direction correction |
+| Denoising lifecycle | Lineage, dependency index, reasoned merge/supersede/archive/retract actions | Automatic deletion/merging based on similar text |
 
-Điểm relation phải nói rõ đo gì: độ hỗ trợ của evidence, tính liên quan, độ mới hay confidence của detector. Lưu thang đo và method version; không cộng các điểm khác nhau khi chưa calibration. Registry loại quan hệ có phiên bản phải định nghĩa chiều và tính đối xứng; chiều cạnh không phải một điểm confidence.
+Relation scores must identify what they measure: evidence support, relevance, freshness, or detector confidence. Retain scales and method versions; do not combine different scores without calibration. A versioned relation-type registry must define direction and symmetry; edge direction is not a confidence score.
 
-Detector tạo assessment/issue với claim revisions, scope giao nhau, bằng chứng và giải thích. Một issue có thể bị bác bỏ bằng decision có lý do; nó không trực tiếp xóa claim hoặc biến quan hệ mâu thuẫn thành sự thật đã xác nhận.
+Detectors create assessments/issues with claim revisions, overlapping scope, evidence, and explanations. An issue can be dismissed by a reasoned decision; it does not directly delete claims or turn a contradiction relation into confirmed truth.
 
-## Denoising và tác động lan truyền
+## Denoising and downstream impact
 
-`merge` tạo đối tượng đích và giữ mapping từ ID cũ; `supersede` chỉ rõ thay thế trong scope/thời gian nào; `archive` đưa khỏi view mặc định; `retract` ghi nhận rút lại. Supersede không mặc nhiên có nghĩa claim trước chưa từng đúng.
+`merge` creates a destination object and retains mappings from old IDs; `supersede` specifies the scope/time of replacement; `archive` removes an object from default views; `retract` records withdrawal. Supersession does not automatically imply that the earlier claim was never correct.
 
-Mỗi hành động đi qua proposal và decision có quyền tương ứng. Không âm thầm chuyển evidence, edge hoặc approval sang đối tượng mới. Dependency index trả lời “claim này đổi thì assessment, relation, decision và document nào bị ảnh hưởng?”. Đối tượng phụ thuộc được đánh dấu `needs_review`, không tự kết luận là sai.
+Each action requires a proposal and appropriately authorized decision. Do not silently transfer evidence, edges, or approvals to new objects. A dependency index answers “if this claim changes, which assessments, relations, decisions, and documents are affected?” Dependents become `needs_review`, not automatically false.
 
-Ví dụ: “giữ log 30 ngày” áp dụng trước 01/07 và “giữ log 90 ngày” áp dụng từ 01/07 khác nội dung nhưng không mâu thuẫn nếu thời gian không giao nhau. Nếu cùng áp dụng tháng 8, vẫn cần kiểm tra domain/điều kiện trước khi kết luận. Quyết định của domain owner phải giữ bằng chứng và lịch sử cả hai claim.
+For example, “retain logs for 30 days” before July 1 and “retain logs for 90 days” from July 1 differ without contradicting each other if their valid periods do not overlap. If both apply in August, domain and conditions still need inspection before concluding a contradiction. The domain owner's decision must preserve evidence and history for both claims.
 
-## Snapshot và cộng tác đồng thời
+## Snapshots and concurrent collaboration
 
-Snapshot cố định document tree, graph records, evidence references, policy revisions và mốc event ledger. Manifest có thể trỏ tới các cây bằng hash; chưa cần triển khai Merkle DAG đầy đủ. Phải lưu blob để truy xuất lại nội dung.
+A snapshot pins the document tree, graph records, evidence references, policy revisions, and an event-ledger position. Manifests may reference trees by hash; a complete Merkle DAG is not necessary yet. Retain blobs so content remains retrievable.
 
-Contribution khai báo `base_snapshot`, `read_set` với revision chính xác, `write_set` với expected revisions và nguồn ngoài. Read set là ngữ cảnh được khai báo đã dùng, không chứng minh agent đã hiểu đầy đủ.
+Contributions declare `base_snapshot`, a `read_set` with exact revisions, a `write_set` with expected revisions, and external sources. The read set declares the context used; it does not prove that an agent understood everything.
 
-Hai đề xuất độc lập có thể cùng được ghi nhận. Khi áp dụng delta, kiểm tra revision đối tượng bị sửa; khi ra decision, kiểm tra thêm policy, evidence và dependencies được khai báo. Đầu vào đổi tạo `needs_revalidation`, không gọi là semantic conflict. Không bắt mọi contribution stale chỉ vì một tài liệu không liên quan đổi.
+Two independent proposals can both be recorded. Applying a delta checks revisions of modified objects; decisions additionally check declared policy, evidence, and dependencies. Changed inputs produce `needs_revalidation`, not a semantic conflict. Do not make every contribution stale because an unrelated document changed.
 
-Read set không phát hiện claim mới xuất hiện hoặc quan hệ ngữ nghĩa chưa biết. Không có xung đột ghi không bảo đảm không có mâu thuẫn kiến thức. Assessment phải giữ snapshot graph/domain để biết phạm vi lần đánh giá.
+Read sets do not detect newly appearing claims or unknown semantic relations. Absence of write conflicts does not guarantee absence of knowledge contradictions. Assessments must retain the graph/domain snapshot to establish their assessment scope.
 
-Triển khai đầu tiên có thể dùng một coordinator tuần tự hóa ghi nhận và quyết định; các agent vẫn đọc, đề xuất, đánh giá đồng thời. Event có idempotency key và thứ tự do coordinator cấp; projection có checkpoint, dựng lại được. Không dùng thứ tự file sync hoặc timestamp máy cá nhân làm thứ tự quyết định.
+An initial implementation may use one coordinator to serialize recording and decisions while agents read, propose, and assess concurrently. Events have idempotency keys and coordinator-assigned order; projections have checkpoints and are rebuildable. Do not use file-sync order or personal computer timestamps as decision order.
 
-## SharePoint và ranh giới lưu trữ
+## SharePoint and storage boundaries
 
 ```text
-wiki/                 Markdown cho người đọc
-contributions/        Bundle đề xuất, suffix báo sẵn sàng tiếp nhận
+wiki/                 Markdown for readers
+contributions/        Proposal bundles; suffix signals readiness for ingestion
 knowledge/
-  objects/            Nội dung/revision bất biến, graph records, evidence
-  snapshots/          Manifest cố định revision và mốc lịch sử
+  objects/            Immutable content/revisions, graph records, evidence
+  snapshots/          Manifests pinning revisions and history positions
   events/             Contribution, assessment, decision, lifecycle events
   policies/           Authority policy revisions
-  views/              Projection/index dựng lại được, checkpoint
+  views/              Rebuildable projections/indexes and checkpoints
 ```
 
-Đây là cấu trúc logic, chưa chốt schema vật lý. Cron chỉ tiếp nhận, kiểm tra và điều phối; `.ready` không có nghĩa claim đã duyệt. Một publisher xuất bản view Markdown; nhiều evaluator có thể bổ sung assessment.
+This is a logical structure, not a finalized physical schema. Cron only ingests, validates, and coordinates; `.ready` does not mean claims are approved. One publisher produces Markdown views; multiple evaluators may add assessments.
 
-Record authoritative phải tách khỏi projection. Quyền ghi bảo vệ lịch sử; hash không ngăn người có quyền sửa cả nội dung và hash. Graph/index/view không được làm lộ dữ liệu vượt quyền nguồn; snapshot tuân thủ chính sách giữ/xóa dữ liệu và thu hồi quyền của công ty.
+Authoritative records must be separate from projections. Write permissions protect history; hashes do not stop someone authorized to edit both content and hashes. Graphs/indexes/views must not expose data beyond source permissions. Snapshots follow company retention/deletion policies and access revocation.
 
-Chi tiết vận chuyển và giới hạn xuất bản nhiều file được giữ trong [phác thảo SharePoint](sharepoint-transport-draft.md). Hành vi Microsoft Graph phải được xác minh trước triển khai. Snapshot logic không đồng nghĩa cập nhật nhiều file hiển thị trên SharePoint là nguyên tử.
+Transport details and multi-file publication limits are retained in the [SharePoint draft](sharepoint-transport-draft.md). Verify Microsoft Graph behavior before implementation. Logical snapshots do not imply atomic updates to multiple files displayed on SharePoint.
 
-## Phạm vi phase nền tảng
+## Foundation phase scope
 
-1. ID/revision, schema version, canonical hashing và snapshot truy xuất được.
-2. Document, claim, relation, source/evidence và mapping; chấp nhận phần chưa cấu trúc hóa.
-3. Contribution, actor/agent provenance, read/write sets và kiểm tra concurrency.
-4. Assessment/Decision riêng biệt; authority policy tối thiểu và kiểm tra quyền phía dịch vụ.
-5. Event ledger, projection, truy vấn thời gian và dependency invalidation.
-6. Lifecycle events thủ công; chưa có thuật toán tự phân xử hoặc denoising.
+1. IDs/revisions, schema versions, canonical hashing, and retrievable snapshots.
+2. Documents, claims, relations, sources/evidence, and mappings, allowing unstructured portions.
+3. Contributions, actor/agent provenance, read/write sets, and concurrency checks.
+4. Separate Assessment/Decision objects; minimum authority policy and service-side permission checks.
+5. Event ledger, projections, temporal queries, and dependency invalidation.
+6. Manual lifecycle events; no automatic arbitration or denoising algorithms yet.
 
-Hợp đồng evaluator tương lai: nhận snapshot và target revisions; trả assessment có inputs, method/version, findings, evidence, limitations. Evaluator không sửa trực tiếp claim hoặc view chính thức. Có thể bổ sung semantic detector và edge scorer mà không thay mô hình trách nhiệm/lịch sử.
+Future evaluator contract: accept snapshots and target revisions; return assessments with inputs, method/version, findings, evidence, and limitations. Evaluators do not directly edit claims or official views. Semantic detectors and edge scorers can be added without changing the accountability/history model.
 
-Chưa chọn graph database, framework agent, thuật toán so sánh ngữ nghĩa, điểm chất lượng chung hoặc ontology domain hoàn chỉnh. Các lựa chọn này cần dữ liệu thực tế.
+No graph database, agent framework, semantic comparison algorithm, universal quality score, or complete domain ontology has been chosen. These choices require real data.
 
-## Tình huống kiểm chứng thiết kế
+## Design validation scenarios
 
-- Rename giữ ID, mapping và lịch sử nguồn.
-- Hai agent dẫn cùng nguồn không được tính thành hai bằng chứng độc lập.
-- Claim giống chữ nhưng khác scope/time không bị tự hợp nhất.
-- Tiếp nhận contribution không tự chấp nhận claim; confidence cao không vượt authority.
-- Nguồn hoặc revision đổi làm assessment liên quan cần review; kết quả cũ vẫn truy xuất được.
-- Quyết định hồi tố trả đúng cả “khi đó biết gì” và “hiện nay cho rằng khi đó áp dụng gì”.
-- Merge/supersede giữ lineage, không tự chuyển approval/evidence.
-- Retry không nhân đôi event; dựng lại projection cho cùng snapshot/policy/query time cho cùng kết quả.
-- Người không có quyền domain không thể quyết định bằng cách sửa manifest.
-- Nguồn hạn chế hoặc buộc xóa không bị lộ qua index; giới hạn tái lập được thể hiện rõ.
+- Renaming preserves IDs, mappings, and source history.
+- Two agents citing one source do not count as two independent pieces of evidence.
+- Claims with identical text but different scope/time are not automatically merged.
+- Ingestion does not accept claims; high confidence does not override authority.
+- Changed sources or revisions require review of related assessments; old results remain retrievable.
+- Retroactive decisions correctly answer both “what was known then” and “what is now considered applicable then.”
+- Merge/supersede retain lineage without automatically transferring approval/evidence.
+- Retries do not duplicate events; rebuilding a projection for the same snapshot/policy/query time gives the same result.
+- Actors without domain authority cannot decide by editing a manifest.
+- Restricted or mandatorily deleted sources do not leak through indexes; reproducibility limits are explicit.
 
-Bước tiếp theo là kiểm nghiệm mô hình với tình huống tri thức thực của công ty trước khi chốt schema v1, đặc biệt ranh giới claim, domain chồng lấn, thời gian hiệu lực và quyền quyết định từng loại hành động.
+The next step is to test the model against real company knowledge scenarios before finalizing schema v1, especially claim boundaries, overlapping domains, valid times, and decision rights for each action.

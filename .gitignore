@@ -7,3 +7,9 @@ __pycache__/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+
+# Local wiki content and source evidence
+/wiki/
+/wiki-en/
+/source/
+/sources/

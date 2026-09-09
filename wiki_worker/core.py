@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from .common import LIMIT, MARKER, Invalid, Conflict, digest, now, parse, target_path, read_file
-from .fixture import FixtureRemote  # compatibility for existing clients
+from .fixture import FixtureRemote as FixtureRemote  # public compatibility export
 from .storage import WikiStorage
 from . import context as proposal_context
 
@@ -340,7 +340,7 @@ class Worker:
 
     def _artifact(self, row, actor, stamp):
         return (f'{MARKER} start -->\n'
-                f'> Phiên bản đã được review · Owner: {self.owner}\n'
+                f'> Reviewed version · Owner: {self.owner}\n'
                 f'> Proposal: {row["id"]} · Reviewer: {actor} · {stamp}\n'
                 '> Review does not guarantee absolute correctness.\n'
                 f'{MARKER} end -->\n\n').encode() + row['proposed']

@@ -66,7 +66,7 @@ Exact original Markdown goes here.
 
 Choose a Boundary matching `wc-[a-z0-9-]{1,200}` which does not occur anywhere in either payload. Use that exact token in all three breaks. Ordinary Markdown rules, headings and old contribution markers inside content are not delimiters. Do not encode or escape the payloads. The wrapper adds exactly two LF characters before and after each payload, and one LF after the end break; these framing characters are not payload bytes. Preserve the payload's own trailing newlines and CRLF bytes separately, including when there is no final newline. `Base SHA-256` and `Proposed SHA-256` hash the exact payloads, excluding framing. Do not invent versions or hashes, and do not include an old review banner in proposed content.
 
-The UI **Tạo file đóng góp** provides named fields and generates this Markdown locally. An agent may generate it directly. Deliver it to the reviewer/operator, who ingests it with:
+The UI **Create contribution file** provides named fields and generates this Markdown locally. An agent may generate it directly. Deliver it to the reviewer/operator, who ingests it with:
 
 ```sh
 python -m wiki_worker.cli --state .wiki-worker --folder wiki --reviewer reviewer-agent \

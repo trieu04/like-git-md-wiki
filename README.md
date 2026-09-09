@@ -1,54 +1,55 @@
 # Like Git SharePoint Wiki
 
-Mục tiêu: wiki vẫn đáng tin khi kiến thức và số người/AI agent đóng góp tăng lên.
+Goal: keep the wiki trustworthy as its knowledge and number of human and AI contributors grow.
 
-MVP chỉ cần chứng minh một luồng: **gửi thay đổi → người phụ trách review → xuất bản đúng bản đã duyệt → có thể truy lại và sửa sai**. Repo đã có layer Python/SQLite với adapter local folder Markdown và fixture test; tích hợp SharePoint và xác thực Microsoft 365 chưa được kiểm chứng.
+The MVP needs to prove one workflow: **submit a change → designated reviewer reviews it → publish exactly what was approved → trace and correct mistakes**. The repository includes a Python/SQLite layer with a local Markdown folder adapter and test fixtures. SharePoint integration and Microsoft 365 authentication have not been verified.
 
-## Làm trước
+## Initial scope
 
-- Giữ wiki Markdown và link hiện tại trên SharePoint.
-- Mỗi đề xuất sửa một file, kèm nội dung nền, hash, nội dung mới, lý do và nguồn nếu có.
-- Reviewer được cấu hình (người hoặc agent) quyết định qua công cụ review; tác giả không tự duyệt. Hệ thống không tự quyết định duyệt.
-- Trước xuất bản, kiểm tra file hiện tại còn đúng bản nền và payload còn đúng bản đã duyệt. Nếu khác, yêu cầu gửi/review lại; không tự merge.
-- Xuất bản nguyên file cuối cùng đã duyệt, gồm khối trạng thái. Nếu không biết lần ghi đã thành công hay chưa, tạm chặn publish vào cùng file để kiểm tra; MVP chưa tự động phục hồi mọi trường hợp.
-- Giữ bản cũ, người gửi, người duyệt và thời điểm để truy vết. Sửa sai bằng đề xuất mới; khôi phục cũng đi qua kiểm tra phiên bản.
-- Hiển thị rõ tài liệu chưa review hoặc phiên bản đã được review, cùng người chịu trách nhiệm. Nhãn review không bảo đảm nội dung đúng tuyệt đối.
+- Preserve the existing Markdown wiki and links on SharePoint.
+- Each proposal changes one file and includes the base content, hashes, new content, reason, and sources when available.
+- A configured reviewer (human or agent) decides through the review tools. Authors cannot approve their own work, and the system never decides approval itself.
+- Before publication, verify that the current file still matches the base and the payload still matches the approval. Otherwise require resubmission and review; do not merge automatically.
+- Publish the exact approved final file, including its status block. If a write outcome is unknown, block publication to that target pending investigation. The MVP does not automatically recover every case.
+- Retain earlier content, submitter, reviewer, and timestamps for auditing. Corrections require new proposals; restoration also goes through version checks.
+- Clearly show whether a document is unreviewed or a particular version has been reviewed, and identify the responsible person. A review label does not guarantee absolute correctness.
 
-MVP chưa làm claim graph, tự phát hiện mâu thuẫn, chấm điểm cạnh, issue tracker, deadline review tự động, dependency invalidation, policy engine hay workflow engine. Chỉ thêm khi pilot gặp vấn đề cụ thể cần giải quyết.
+The MVP does not include a claim graph, automatic contradiction detection, edge scoring, an issue tracker, automatic review deadlines, dependency invalidation, a policy engine, or a workflow engine. Add these only when the pilot reveals a concrete need.
 
-## Cách kiểm chứng
+## Validation
 
-Thử trên một nhóm tài liệu và một người phụ trách. Kiểm tra người đọc nhận biết trạng thái; hai agent sửa cùng file không ghi đè nhau; chạy worker lại không xuất bản hai lần; có thể truy nguồn và sửa một nội dung sai. Theo dõi thủ công tuổi đề xuất chờ, thời gian sửa sai và lỗi qua kiểm tra mẫu.
+Try a small document set with one designated reviewer. Check that readers recognize review status, two agents editing the same file cannot overwrite each other, restarting the worker does not publish twice, and incorrect content can be traced to its sources and corrected. Manually track pending proposal age, correction time, and errors found in sample checks.
 
-## Tài liệu thực hiện
+## Implementation documents
 
-- [Thiết kế MVP](docs/design.md)
+- [MVP design](docs/design.md)
 - [Plan](docs/plan.md)
 - [Implementation plan](docs/implementation-plan.md)
-- [Wiki đột quỵ (bản local)](wiki/index.md)
 
-Các bản `knowledge-model-horizon.md` và `sharepoint-transport-draft.md` là tham khảo lịch sử, không phải backlog hay yêu cầu triển khai.
+`knowledge-model-horizon.md` and `sharepoint-transport-draft.md` are historical references, not a backlog or implementation requirements.
 
 ## Runtime
 
-Xem [hướng dẫn chạy và phục hồi](docs/runtime.md). Chạy test bằng `python -m unittest discover -s tests -v`. Hỗ trợ `--folder` cho wiki Markdown thật và `--fixture` cho test; chưa có kết nối HTTP SharePoint.
+See the [runtime and recovery guide](docs/runtime.md). Run all checks with `make test`. Use `--folder` for a real Markdown wiki and `--fixture` for tests; there is no SharePoint HTTP connection yet.
 
-Wiki luôn là cây file Markdown. Xem [kiến trúc layer và adapter](docs/storage-layer.md) để chạy với local folder và tích hợp nguồn SharePoint.
+The wiki remains a Markdown file tree. See the [layer and adapter architecture](docs/storage-layer.md) for local folders and future SharePoint integration.
 
-Web UI dùng HTML, Pico CSS và AlpineJS, chạy bằng lệnh `wiki-worker ... web` trên localhost.
+Wiki content and source evidence are local data, excluded from Git in `wiki/`, `wiki-en/`, `source/`, and `sources/`. Supply your own Markdown folder. `make run` defaults to `wiki-en`; override it with `make run WIKI=/path/to/wiki`.
 
-## Hai luồng: đóng góp và reviewer
+The web UI uses HTML, Pico CSS, and AlpineJS and runs on localhost through `wiki-worker ... web`.
 
-**Đóng góp — Skill cho agent.** Agent tự khám phá/tìm kiếm file, lấy phiên bản bằng lệnh `context`, đọc nguồn và tạo một file `.contribution.md`. Agent không dùng HTTP API để gửi nội dung. Quy ước đầy đủ nằm trong [skill đóng góp](skills/wiki-knowledge-workflow/references/contribution.md).
+## Two workflows: contributor and reviewer
 
-**Reviewer — UI + Skill.** Reviewer tiếp nhận file/bundle bằng `scan`, hoặc nhập file `.contribution.md` trong UI. `GET /api/contribution/ID` gộp nội dung, nguồn, trạng thái và artifact trong một response. Công cụ review/publish dùng `/api/contribution/ID/review` và `/api/contribution/ID/publish`. Xem [skill reviewer](skills/wiki-knowledge-workflow/references/reviewer.md).
+**Contributing — agent skill.** Agents discover and search files directly, obtain versions with `context`, read the sources, and create a `.contribution.md` file. They do not submit content through an HTTP API. See the [contribution convention](skills/wiki-knowledge-workflow/references/contribution.md).
 
-UI có form **Đóng góp** tạo file Markdown v2: bảng **Phạm vi áp dụng và tác động** lưu `file | version | tác động`, bảng **Sources** lưu `file | version`. Worker tra SHA-256 từ snapshot đã đăng ký cho version, nên các bảng không chứa hash. Dòng đầu của bảng phạm vi là file chính. Người dùng có thể nhập toàn bộ nội dung, thay một đoạn xuất hiện đúng một lần, hoặc thêm vào cuối; file vẫn chứa toàn bộ Markdown cuối cùng. Tạo file diễn ra trong trình duyệt và chưa gửi vào hàng chờ. Form **Reviewer** hiển thị hai bảng cùng nội dung và ngữ cảnh đã ghim.
+**Reviewing — UI and skill.** Reviewers ingest files or bundles with `scan`, or import a `.contribution.md` file in the UI. `GET /api/contribution/ID` combines content, sources, status, and the exact artifact in one response. Review and publication use `/api/contribution/ID/review` and `/api/contribution/ID/publish`. See the [reviewer skill](skills/wiki-knowledge-workflow/references/reviewer.md).
 
-Nguồn dùng phiên bản `YYYYMMDD-N` theo ngày quan sát UTC, snapshot bất biến và SHA-256. Kiểm tra độ mới khi scan/import, approve và publish. Nội dung và quyết định vẫn do agent đánh giá; hệ thống không tự duyệt. Bản cũ không có context hiển thị `unversioned`.
+The **Contribute** form creates a Markdown v3 file. Its **Scope and impact** table records `file | version | impact`; its **Sources** table records `file | version`. The worker resolves SHA-256 hashes from registered version snapshots, so these tables do not contain hashes. The first scope row identifies the primary file. Users can provide the complete content, replace a passage that occurs exactly once, or append content; the file always contains the complete resulting Markdown. Generation happens in the browser and does not add the file to the queue. The **Reviewer** form displays both tables alongside the content and pinned context.
+
+Sources use `YYYYMMDD-N` versions based on UTC observation dates, immutable snapshots, and SHA-256. Freshness is checked at scan/import, approval, and publication. Agents assess content and make decisions; the system does not approve automatically. Older proposals without context appear as `unversioned`.
 
 ```sh
-python -m wiki_worker.cli --state .wiki-worker --folder wiki --reviewer reviewer-agent web --port 8080
+python -m wiki_worker.cli --state .wiki-worker --folder wiki-en --reviewer reviewer-agent web --port 8080
 ```
 
-Kiểm tra form tạo file bằng `node tests/test_ui_file.js`, workflow bằng `python -m unittest discover -s tests -v`.
+Check browser file generation with `node tests/test_ui_file.js` and the workflow with `python -m unittest discover -s tests -v`.

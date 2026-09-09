@@ -41,7 +41,6 @@ class FixtureRemote:
         row = self.db.execute('SELECT * FROM writes WHERE receipt=?', (result['receipt'],)).fetchone()
         return row is not None and dict(row) == result
 
-
     def receipt(self, receipt, prepared):
         row = self.db.execute('SELECT * FROM writes WHERE receipt=?', (receipt,)).fetchone()
         if row is None:
@@ -55,4 +54,3 @@ class FixtureRemote:
 
     def list_markdown(self):
         return [row[0] for row in self.db.execute('SELECT target FROM files ORDER BY target')]
-

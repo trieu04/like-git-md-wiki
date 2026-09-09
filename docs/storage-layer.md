@@ -1,30 +1,31 @@
-# Lớp xử lý trung gian cho wiki Markdown
+# Processing layer for a Markdown wiki
 
-Wiki là cây file Markdown và link tương đối. Local folder hoặc SharePoint là nơi
-lưu cây file đó. SQLite của worker chỉ giữ trạng thái xử lý, bundle đóng băng và
-lịch sử; không thay thế định dạng wiki.
+The wiki is a tree of Markdown files with relative links. A local folder or
+SharePoint stores that tree. The worker's SQLite database stores processing
+state, frozen bundles, and history; it does not replace the wiki format.
 
 ```text
 Local folder ─── adapter ───┐
                            ├── WikiStorage ── Worker: submit → review → publish
 SharePoint ──── adapter ────┘                         │
-                                            SQLite trạng thái/lịch sử
+                                            SQLite state/history
 ```
 
-## Đã chạy được
+## Working components
 
-- `LocalFolderStorage`: đọc wiki hiện có và xuất bản trực tiếp file `.md`, giữ
-  đường dẫn tương đối. Thư mục `.wiki-system/` chứa lock và receipt của adapter.
-- `FixtureRemote`: adapter SQLite chỉ dành cho test, tách khỏi workflow.
-- `WikiStorage`: giao diện chung cho list/read/conditional write/verify/receipt.
-  Version là token opaque: workflow không giả định số phiên bản tăng dần hay
-  truy cập database của adapter.
-- `Worker.submit(manifest, base, proposed, submitter)`: nhận byte đã tải từ một
-  nguồn bất kỳ; không bắt buộc proposal phải nằm trong local folder.
-- `Worker.propose(...)`: lấy bản nền từ storage đang cấu hình rồi tạo proposal.
-  Quá trình này chỉ ghi trạng thái; wiki chỉ đổi sau approval và publish.
+- `LocalFolderStorage`: reads an existing wiki and publishes `.md` files directly,
+  preserving relative paths. `.wiki-system/` holds the adapter lock and receipts.
+- `FixtureRemote`: a SQLite adapter for tests, separate from the workflow.
+- `WikiStorage`: a shared interface for list/read/conditional write/verify/receipt.
+  Versions are opaque tokens: the workflow does not assume increasing version
+  numbers or access the adapter's database.
+- `Worker.submit(manifest, base, proposed, submitter)`: accepts downloaded bytes
+  from any source; proposals do not have to reside in a local folder.
+- `Worker.propose(...)`: captures the base from the configured storage and creates
+  a proposal. This changes worker state only; the wiki changes after approval
+  and publication.
 
-Ví dụ chạy từ repo, thay các đường dẫn mẫu bằng đường dẫn của bạn:
+Run from the repository, replacing the example paths with your own:
 
 ```sh
 python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer list
@@ -32,57 +33,64 @@ python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state -
 python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer context index.md --source source.md
 # Agent creates the bundle using the skill before scan:
 python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer scan /path/to/contribution-bundle --submitter author
-python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer review change-1 --actor reviewer --reason 'Đã kiểm tra nguồn'
+python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer review change-1 --actor reviewer --reason 'Checked the sources'
 python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer publish change-1
 ```
 
 ## Web UI
 
-Khởi động UI trên máy local bằng cùng cấu hình storage/state/reviewer:
+Start the local UI with the same storage/state/reviewer configuration:
 
 ```sh
 python -m wiki_worker.cli --folder /path/to/wiki --state /path/to/worker-state --reviewer reviewer web --port 8080
 ```
 
-Mở `http://127.0.0.1:8080`. UI dùng HTML, Pico CSS và AlpineJS; Pico/Alpine
-được tải từ CDN nên trình duyệt cần mạng để có style và tương tác. Backend HTTP
-dùng Python standard library và gọi đúng `Worker` đang phục vụ CLI. UI hỗ trợ
-tạo file đóng góp từ context đã lưu, tiếp nhận file để review, đọc contribution
-cùng diff/artifact, ghi quyết định và publish. Agent tự tìm kiếm tài liệu qua filesystem.
+Open `http://127.0.0.1:8080`. The UI uses HTML, Pico CSS, and AlpineJS;
+Pico/Alpine load from CDNs, so the browser needs network access for styling and
+interaction. The HTTP backend uses the Python standard library and the same
+`Worker` as the CLI. The UI can generate contribution files from saved context,
+ingest them for review, display contributions with diffs/artifacts, record
+decisions, and publish. Agents discover documents through the filesystem.
 
-Web server hiện chỉ cho bind localhost vì chưa có đăng nhập, session hoặc CSRF.
-Reviewer và submitter vẫn là identity của môi trường pilot tin cậy. Không reverse
-proxy hoặc expose port này ra mạng. Adapter SharePoint sau này phải cung cấp danh
-tính Microsoft đã xác thực cho API thay vì nhận identity từ form.
+The web server only binds to localhost because login, sessions, and CSRF
+protection are not implemented. Reviewer and submitter identities still come
+from the trusted pilot environment. Do not reverse-proxy or expose this port to
+the network. A future SharePoint adapter must supply authenticated Microsoft
+identities to the API instead of accepting identities from a form.
 
-Dùng một state directory cố định cho mỗi wiki. Không đổi storage của state đang
-có proposal. `--actor`/`--submitter` là danh tính do môi trường CLI tin cậy cung
-cấp, không phải đăng nhập Microsoft. Cần giới hạn quyền chạy bằng tài khoản worker.
+Use one fixed state directory per wiki. Do not change storage for a state that
+already contains proposals. `--actor`/`--submitter` are identities supplied by the
+trusted CLI environment, not Microsoft logins. Restrict execution under the
+worker account.
 
-Local adapter dùng lock chung theo wiki root, file tạm, fsync và atomic rename.
-Tạo mới dùng thao tác không thay file đã tồn tại. Mọi writer phải tuân theo lock
-của adapter; quyền ghi wiki nên chỉ thuộc worker. Editor hoặc chương trình sync
-bỏ qua lock có thể ghi đúng lúc kiểm tra/rename, nên local folder đang sync
-SharePoint không tương đương adapter SharePoint có ETag. Thay đổi ngoài luồng
-trước publish được phát hiện qua base hash/version, nhưng không có cam kết CAS
-với writer không hợp tác.
+The local adapter uses a shared lock per wiki root, temporary files, fsync, and
+atomic rename. Creation uses an operation that cannot replace an existing file.
+All writers must honor the adapter lock; wiki write access should belong only
+to the worker. Editors or sync programs that ignore the lock may write between
+the check and rename, so a SharePoint-synced local folder is not equivalent to a
+SharePoint adapter with ETags. External changes before publication are detected
+through base hashes/versions, but there is no compare-and-swap guarantee with
+uncooperative writers.
 
-## Điểm nối SharePoint
+## SharePoint integration boundary
 
-Chưa có HTTP adapter SharePoint trong bản này. Adapter đó triển khai `WikiStorage`
-và được truyền vào `Worker(root, storage, reviewer)`, không sửa luật review/publish:
+This release has no SharePoint HTTP adapter. Such an adapter implements
+`WikiStorage` and is passed to `Worker(root, storage, reviewer)`, without changing
+review/publication rules:
 
-1. `list_markdown`: liệt kê đường dẫn logic trong wiki root đã cấu hình.
-2. `read`: trả `content` (bytes), `item`, `version` (ETag) của cùng một phiên bản;
-   chỉ trả `None` khi xác nhận không tồn tại.
-3. `write`: nhận điều kiện `[item, version]` hoặc `None` để tạo mới. Chỉ báo
-   `Conflict` nếu chắc chắn không ghi; timeout phải đi vào luồng chưa rõ kết quả.
-4. `verify` và `receipt`: xác minh bằng chứng thao tác cụ thể, gồm target, artifact
-   hash và điều kiện ghi gốc; không chỉ so hash nội dung hiện tại.
-5. Tiếp nhận proposal: tải manifest/base/proposed, gắn danh tính xác thực với bản
-   manifest đã tải, rồi gọi `Worker.submit`. Lớp xử lý kiểm tra schema/hash và đóng
-   băng byte như với local folder.
+1. `list_markdown`: list logical paths within the configured wiki root.
+2. `read`: return `content` (bytes), `item`, and `version` (ETag) from the same
+   version; return `None` only for confirmed absence.
+3. `write`: accept an `[item, version]` condition or `None` for creation. Raise
+   `Conflict` only when the write definitively did not happen; timeouts must
+   enter the uncertain-outcome workflow.
+4. `verify` and `receipt`: verify evidence for a specific operation, including
+   target, artifact hash, and original write condition, not just current content
+   hashes.
+5. Proposal ingestion: download manifest/base/proposed, bind authenticated
+   identity to the downloaded manifest version, and call `Worker.submit`. The
+   layer validates schema/hashes and freezes bytes just as for local folders.
 
-Cần thêm HTTP/auth và kiểm chứng conditional write/ETag trên tenant trước khi
-có thể dùng SharePoint thật. Không dùng fixture hoặc folder sync để suy ra rằng
-các điều kiện đó đã được đáp ứng. Xem các ca cần kiểm chứng trong `runtime.md`.
+HTTP/authentication and tenant verification of conditional writes/ETags are
+required before using live SharePoint. Do not infer these guarantees from the
+fixture or a synced folder. See the verification cases in [runtime](runtime.md).

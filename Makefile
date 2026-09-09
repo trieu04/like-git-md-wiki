@@ -1,6 +1,6 @@
 PYTHON ?= python
 STATE ?= .wiki-worker
-WIKI ?= wiki
+WIKI ?= wiki-en
 REVIEWER ?= reviewer-agent
 PORT ?= 8080
 

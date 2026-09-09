@@ -3,7 +3,9 @@ import json
 import sys
 from pathlib import Path
 
-from .core import FixtureRemote, Invalid, Conflict, Worker, read_file, target_path
+from .common import Conflict, Invalid, read_file, target_path
+from .core import Worker
+from .fixture import FixtureRemote
 from .local import LocalFolderStorage
 from .web import serve
 

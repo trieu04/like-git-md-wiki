@@ -2,7 +2,7 @@
 
 ## Use the worker
 
-The reviewer works on contributions received as files/bundles. To ingest a bundle use `scan PATH --submitter AUTHOR` with the configured worker state/storage. For a `.contribution.md` file the UI provides **Tiếp nhận file** and a verified-author field. Its first tables show target and related-file versions. Import is an explicit pending-state operation, not a decision.
+The reviewer works on contributions received as files/bundles. To ingest a bundle use `scan PATH --submitter AUTHOR` with the configured worker state/storage. For a `.contribution.md` file the UI provides **Import file** and a verified-author field. Its first tables show target and related-file versions. Import is an explicit pending-state operation, not a decision.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -32,6 +32,6 @@ Read [merge-conflicts.md](merge-conflicts.md) whenever the target or a source ch
 
 ## Use author metadata
 
-`submitter` is the identity supplied by the trusted ingestion boundary. `author_metadata` is frozen, author-declared context: `name`, `role` (chức vụ), `expert` (the author's subject expertise), and `metadata_source`. Missing metadata means unknown; never infer expertise from a username. A metadata source is a provenance pointer, not proof of verification. Read it and declare/capture any document used as decision evidence.
+`submitter` is the identity supplied by the trusted ingestion boundary. `author_metadata` is frozen, author-declared context: `name`, `role` (job role), `expert` (the author's subject expertise), and `metadata_source`. Missing metadata means unknown; never infer expertise from a username. A metadata source is a provenance pointer, not proof of verification. Read it and declare/capture any document used as decision evidence.
 
 Use expertise only for claims within that expertise. Use role to establish documented ownership or decision authority, not factual correctness. Prefer applicable authoritative evidence, effective dates and scope over seniority, submission order or confidence. If two experts disagree, compare their sources and assumptions; if evidence cannot settle it, leave pending with the disputed claims and needed domain-owner input, or reject with a revision request. Record which metadata was verified, how, and how it affected the decision. Never allow metadata to bypass distinct author/reviewer identities or freshness checks.

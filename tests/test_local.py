@@ -36,6 +36,14 @@ class LocalStorageTests(unittest.TestCase):
         self.assertEqual(self.worker.publish('edit'), 'published')
         self.assertEqual(len(list(self.storage.receipts.glob('*.json'))), 2)
 
+    def test_listing_excludes_incoming_contributions_and_internal_files(self):
+        self.storage.write('guide.md', b'# Guide', None)
+        inbox = self.root / 'wiki/contributions'
+        inbox.mkdir()
+        (inbox / 'XX123.contribution.md').write_text('# Incoming contribution')
+        (self.storage.control / 'internal.md').write_text('# Internal state')
+        self.assertEqual(self.storage.list_markdown(), ['guide.md'])
+
     def test_conditional_versions_are_opaque_and_create_does_not_replace(self):
         first = self.storage.write('a.md', b'First', None)
         with self.assertRaises(Conflict):

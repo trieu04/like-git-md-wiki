@@ -1,43 +1,43 @@
 # Implementation plan
 
-Đã triển khai luồng fixture Python/SQLite cho bước 2–3; xem [runtime](runtime.md). Spike SharePoint thật và pilot còn chờ tenant. Thực hiện lần lượt bốn bước; không tạo trước bộ khung cho các khả năng chưa dùng.
+The Python/SQLite fixture workflow for steps 2–3 is implemented; see [runtime](runtime.md). The live SharePoint spike and pilot still require a tenant. Work through the four steps in order, without scaffolding unused capabilities in advance.
 
-Ưu tiên một luồng nhỏ chạy được. Ca publish không rõ kết quả được dừng để kiểm tra thủ công; chưa xây cơ chế phục hồi tự động tổng quát.
+Prioritize a small working flow. Pause publication with an uncertain outcome for manual investigation; do not build a general automatic recovery mechanism yet.
 
-## Bước 1 — SharePoint spike
+## Step 1 — SharePoint spike
 
-- Viết script thử đọc/upload và conditional update/create trong folder test; chứng minh byte nội dung và ETag thuộc cùng phiên bản, kể cả khi file đổi giữa các lần đọc.
-- Kiểm tra identity người gửi, xác thực reviewer và quyền bảo vệ wiki/history.
-- Kiểm tra render Markdown và trạng thái review trên kênh đọc hiện tại.
-- Ghi kết quả cùng giới hạn API, không đưa secret vào repo.
+- Write scripts to test reading/uploading and conditional update/create in a test folder. Prove that content bytes and ETag belong to the same version, including when a file changes between reads.
+- Check submitter identity, reviewer authentication, and permissions protecting wiki/history.
+- Check Markdown rendering and review status in the current reading channel.
+- Record results and API limitations without committing secrets.
 
-Xong khi chứng minh được cơ chế xác thực và chống ghi đè. Chưa có tenant thì dùng fixture cho bước tiếp theo, ghi rõ chưa kiểm chứng tích hợp.
+Complete when authentication and overwrite protection are demonstrated. If no tenant is available, use fixtures for the next step and explicitly record that integration remains unverified.
 
-## Bước 2 — Submit và review
+## Step 2 — Submit and review
 
-- Tạo chương trình Python nhỏ, SQLite và các lệnh `scan`, `review`, `status`; dùng chung process lock cho các thao tác đổi trạng thái ngay từ bước này.
-- Parse manifest, kiểm tra path/hash/giới hạn file; đóng băng bundle và xử lý proposal ID trùng.
-- Hiển thị diff, nguồn, lý do và file cuối cùng có khối trạng thái; lưu quyết định gắn bundle/artifact hashes và identity đã xác thực.
-- Chặn self-review và payload thay đổi sau tiếp nhận.
+- Build a small Python program with SQLite and `scan`, `review`, and `status` commands. Share a process lock across state changes from this step onward.
+- Parse manifests, validate paths/hashes/file limits, freeze bundles, and handle duplicate proposal IDs.
+- Display the diff, sources, reason, and final file with its status block. Store decisions bound to bundle/artifact hashes and authenticated identities.
+- Block self-review and payload changes after ingestion.
 
-Xong khi người phụ trách review được một proposal và mọi lần retry vẫn trỏ đúng một bundle.
+Complete when the designated reviewer can review a proposal and every retry still refers to exactly one bundle.
 
-## Bước 3 — Publish và phục hồi
+## Step 3 — Publish and recover
 
-- Thêm `publish` dùng chung process lock, lưu target/artifact hash/điều kiện ghi trước remote write và dùng conditional operation đã spike.
-- Xuất bản nguyên artifact đã duyệt, lưu base/proposed/artifact hashes cùng kết quả remote; hoàn tất history trước khi báo published.
-- Khi restart, kiểm tra các lần ghi dở và chặn publish cùng target nếu chưa rõ kết quả; file khác vẫn tiếp tục. Người phụ trách ghi bằng chứng trước khi bỏ chặn. Không coi hash trùng là đủ bằng chứng; history lỗi sau ghi không được làm upload wiki lại.
-- Thêm cron, backup và hướng dẫn xử lý stale/drift.
+- Add `publish` using the shared process lock. Persist target, artifact hash, and write conditions before the remote write, and use the conditional operation verified by the spike.
+- Publish the exact approved artifact. Retain base/proposed/artifact hashes and the remote result; finish history before reporting `published`.
+- On restart, inspect incomplete writes and block other publications to the same target while the outcome remains unknown. Other files can proceed. Record operator evidence before unblocking. A matching hash is insufficient evidence, and history failures after writing must not trigger another wiki upload.
+- Add cron, backup, and instructions for handling stale content and drift.
 
-Xong khi kiểm thử: hai proposal cùng base sửa cùng file chỉ một được publish; crash sau remote write không nhân đôi và ca chưa rõ bị chặn; remote thay đổi ngoài dự kiến không bị ghi đè. Artifact xuất bản đúng byte đã duyệt; khôi phục bằng proposal mới không mang nhãn review cũ hoặc lặp khối trạng thái.
+Complete when tests prove that only one of two proposals with the same base can publish to the same file; crashes after remote writes do not duplicate publication; uncertain writes remain blocked; and unexpected remote changes are not overwritten. Published artifacts must match the approved bytes. Restoration through a new proposal must not retain old review labels or duplicate status blocks.
 
-Hai ca cần kiểm tra riêng: file đổi giữa đọc nội dung và metadata không được tạo điều kiện ghi sai; lần ghi chưa rõ kết quả phải chặn proposal khác cùng target qua cả restart, nhưng không chặn file khác.
+Test two cases separately: changes between content and metadata reads must not produce an invalid write condition; an uncertain write must block other proposals to the same target across restarts while leaving other targets usable.
 
-## Bước 4 — Pilot
+## Step 4 — Pilot
 
-- Thiết lập quyền, import tài liệu với nhãn chưa review và chạy bộ tình huống thực.
-- Thử token hết hạn, throttling, permission denied và backup/restore.
-- Ghi tuổi queue, thời gian sửa sai và lỗi kiểm tra mẫu bằng bảng thủ công.
-- Người phụ trách quyết định mở rộng dựa trên kết quả; không mở rộng nếu review đã nghẽn.
+- Configure permissions, import documents with unreviewed labels, and run realistic scenarios.
+- Test expired tokens, throttling, denied permissions, and backup/restore.
+- Record queue age, correction time, and sample-check errors manually.
+- Let the designated owner decide whether to expand based on the results. Do not expand while review is already a bottleneck.
 
-Test tập trung vào quyền, phiên bản, idempotency và crash recovery. Dùng SQLite thật, fake remote để chèn lỗi, và kiểm tra SharePoint thật trong folder test. Chưa cần API server, UI, benchmark tổng quát, dashboard hoặc test mọi helper.
+Focus testing on permissions, versions, idempotency, and crash recovery. Use real SQLite, a fake remote for fault injection, and live SharePoint checks in a test folder. The initial plan did not require an API server, UI, general benchmarks, dashboards, or tests for every helper; the current runtime also includes a local reviewer UI/API.
