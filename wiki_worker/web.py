@@ -114,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             parts = route.strip('/').split('/')
             if len(parts) == 3 and parts[:2] == ['api', 'contribution']:
                 return self.json(HTTPStatus.OK, worker.contribution(unquote(parts[2])))
+            if len(parts) == 3 and parts[:2] == ['api', 'discussion']:
+                return self.json(HTTPStatus.OK, worker.get_discussion(unquote(parts[2])))
             self.json(HTTPStatus.NOT_FOUND, {'error': 'route not found'})
         except (Invalid, Conflict, UnicodeError) as exc:
             self.json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
@@ -126,7 +128,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = urlsplit(self.path).path
             parts = route.strip('/').split('/')
-            if route != '/api/contribution/import' and not (len(parts) == 4 and parts[:2] == ['api', 'contribution'] and parts[3] in ('review', 'publish')):
+            discussion_route = (route == '/api/discussion' or
+                (len(parts) == 4 and parts[:2] == ['api', 'discussion'] and
+                 parts[3] in ('messages', 'resolve', 'hold')))
+            if (route != '/api/contribution/import' and not discussion_route and not
+                    (len(parts) == 4 and parts[:2] == ['api', 'contribution'] and
+                     parts[3] in ('review', 'publish', 'discussion'))):
                 return self.json(HTTPStatus.NOT_FOUND, {'error': 'route not found'})
             data = self.body()
             worker = self.server.application.worker()
@@ -135,12 +142,55 @@ class Handler(BaseHTTPRequestHandler):
                     raise Invalid('contribution file and verified submitter required')
                 ident = worker.import_contribution(data['file'].encode(), data['submitter'])
                 return self.json(HTTPStatus.CREATED, {'id': ident})
+            if route == '/api/discussion':
+                required = ('proposal_id', 'actor', 'bundle_hash', 'reason')
+                if any(not isinstance(data.get(key), str) for key in required):
+                    raise Invalid('incomplete discussion creation')
+                result = worker.create_discussion(data['proposal_id'], data['actor'],
+                                                  data['bundle_hash'], data['reason'])
+                return self.json(HTTPStatus.CREATED, result)
+            if len(parts) == 4 and parts[:2] == ['api', 'discussion']:
+                ident = unquote(parts[2])
+                required = ('actor', 'bundle_hash', 'discussion_version')
+                if (any(key not in data for key in required) or
+                        not isinstance(data.get('actor'), str) or not isinstance(data.get('bundle_hash'), str) or
+                        type(data.get('discussion_version')) is not int):
+                    raise Invalid('incomplete discussion request')
+                if parts[3] == 'messages':
+                    if not isinstance(data.get('message'), str):
+                        raise Invalid('discussion message required')
+                    result = worker.add_discussion_message(
+                        ident, data['actor'], data['bundle_hash'], data['discussion_version'],
+                        data['message'], data.get('agrees_with'))
+                elif parts[3] == 'hold':
+                    if not isinstance(data.get('reason'), str):
+                        raise Invalid('hold reason required')
+                    result = worker.hold_proposal(ident, data['actor'], data['bundle_hash'],
+                                                  data['discussion_version'], data['reason'])
+                else:
+                    if not isinstance(data.get('decision'), str) or not isinstance(data.get('reason'), str):
+                        raise Invalid('discussion decision and reason required')
+                    result = worker.resolve_discussion(ident, data['actor'], data['bundle_hash'],
+                                                       data['discussion_version'], data['decision'], data['reason'])
+                return self.json(HTTPStatus.OK, result)
             ident = unquote(parts[2])
+            if parts[3] == 'discussion':
+                keys = ('actor', 'bundle_hash', 'action', 'reason')
+                if any(not isinstance(data.get(key), str) for key in keys):
+                    raise Invalid('incomplete semantic discussion entry')
+                result = worker.discuss(
+                    ident, data['actor'], data['bundle_hash'], data.get('discussion_version'),
+                    data['action'], data['reason'], data.get('resolution_kind'),
+                    data.get('related_contribution_ids'))
+                return self.json(HTTPStatus.OK, result)
             if parts[3] == 'review':
                 keys = ('bundle_hash', 'time', 'artifact', 'actor', 'reason')
                 if any(not isinstance(data.get(k), str) for k in keys) or not isinstance(data.get('approve'), bool):
                     raise Invalid('incomplete review decision')
-                preview = dict(bundle_hash=data['bundle_hash'], time=data['time'], artifact=data['artifact'].encode())
+                preview = dict(bundle_hash=data['bundle_hash'], time=data['time'],
+                               artifact=data['artifact'].encode(),
+                               discussion_version=data.get('discussion_version'),
+                               workflow_discussion_version=data.get('workflow_discussion_version'))
                 worker.review(ident, data['actor'], preview, data['approve'], data['reason'])
                 return self.json(HTTPStatus.OK, {'state': 'approved' if data['approve'] else 'rejected'})
             return self.json(HTTPStatus.OK, {'state': worker.publish(ident)})

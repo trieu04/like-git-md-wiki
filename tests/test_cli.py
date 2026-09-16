@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,15 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), 'cli-scan')
+
+            discussion = subprocess.run(
+                [sys.executable, '-m', 'wiki_worker.cli', '--state', str(root / 'state'),
+                 '--folder', str(wiki), '--reviewer', 'reviewer', 'discuss', 'cli-scan',
+                 '--actor', 'reviewer', '--action', 'open', '--reason', 'Claims conflict'],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(discussion.returncode, 0, discussion.stderr)
+            self.assertTrue(json.loads(discussion.stdout)['disputed'])
 
 
 if __name__ == '__main__':

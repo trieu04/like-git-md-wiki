@@ -11,10 +11,11 @@ The reviewer works on contributions received as files/bundles. To ingest a bundl
 | `GET /api/wiki/versions?path=PATH` | URL-encoded Markdown path | Observed version references and tracked contributions with decisions, proposed diffs and publication receipts |
 | `GET /api/wiki/version?path=PATH&version=VERSION` | Exact version from history | Immutable content, hash and capture time |
 | `POST /api/contribution/import` | `file` (file text), `submitter` (verified author) | Imported ID, pending |
-| `POST /api/contribution/ID/review` | `actor`, `reason`, boolean `approve`, original `bundle_hash`, `time`, `artifact` | approved/rejected |
+| `POST /api/contribution/ID/review` | `actor`, `reason`, boolean `approve`, original `bundle_hash`, `time`, `artifact`, `discussion_version` | approved/rejected |
+| `POST /api/contribution/ID/discussion` | `actor`, `bundle_hash`, `discussion_version`, `action`, `reason`, optional resolution and related IDs | appended discussion state |
 | `POST /api/contribution/ID/publish` | `{}` | published/stale |
 
-Read and artifact preview are one request; there is no separate preview endpoint. Approved/rejected/published contributions include their saved artifact for inspection. Only pending contributions may be reviewed; `can_review` also excludes the author from self-review. It does not assess source freshness or correctness.
+Read and artifact preview are one request; there is no separate preview endpoint. It also returns `semantic_discussion`, `discussion_version`, and `disputed`. Approved/rejected/published contributions include their saved artifact for inspection. Only pending contributions may be reviewed; `can_review` also excludes the author from self-review. It does not assess source freshness or correctness.
 
 ## Approval rules
 
@@ -22,7 +23,7 @@ When assigned review, inspect pending contributions and assess source support, c
 
 If context is `stale`, inspect old snapshots and obtain current context using the CLI, then reject or request revision; do not approve. If it is `unversioned`, request versioned context when needed. If evidence is insufficient, leave pending and report what is missing, or explicitly reject with reasons. `current` alone does not justify approval.
 
-Send the exact artifact/time/hash from the contribution response with your decision; do not recreate these fields. The configured reviewer identity may be an agent distinct from the author. An assigned publication step calls publish separately; the worker checks freshness again. Reading/importing a contribution never automatically approves it.
+Send the exact artifact/time/hash and `discussion_version` from the contribution response with your decision; do not recreate these fields. Approval is blocked while `disputed` is true, while rejection remains available for a concrete revision request. Follow [semantic-conflicts.md](semantic-conflicts.md) to record the claims, evidence and outcome. The configured reviewer identity may be an agent distinct from the author. An assigned publication step calls publish separately; the worker checks freshness again. Reading/importing a contribution never automatically approves it.
 
 The API runs on localhost with caller-declared identities in a trusted environment; production authentication is not implemented.
 

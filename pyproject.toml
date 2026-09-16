@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "like-git-sharepoint-wiki"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reviewed Markdown wiki layer for local folders and SharePoint adapters"
 requires-python = ">=3.11"
 dependencies = []

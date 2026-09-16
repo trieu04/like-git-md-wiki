@@ -22,6 +22,15 @@ ROLES = {
 def skill_file(role):
     item = ROLES[role]
     body = item['source'].read_text(encoding='utf-8')
+    references = ['merge-conflicts']
+    if role == 'reviewer':
+        references.append('semantic-conflicts')
+    for reference in references:
+        extra = (SKILL_ROOT / 'references' / f'{reference}.md').read_text(encoding='utf-8')
+        anchor = {'merge-conflicts': 'merge-and-conflict-logic',
+                  'semantic-conflicts': 'semantic-content-disputes'}[reference]
+        body = body.replace(f']({reference}.md)', f'](#{anchor})')
+        body += '\n\n' + extra
     header = f"---\nname: {item['name']}\ndescription: {item['description']}\n---\n\n"
     return item['filename'], (header + body).encode('utf-8')
 

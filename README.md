@@ -14,7 +14,7 @@ The MVP needs to prove one workflow: **submit a change → designated reviewer r
 - Retain earlier content, submitter, reviewer, and timestamps for auditing. Corrections require new proposals; restoration also goes through version checks.
 - Clearly show whether a document is unreviewed or a particular version has been reviewed, and identify the responsible person. A review label does not guarantee absolute correctness.
 
-The MVP does not include a claim graph, automatic contradiction detection, edge scoring, an issue tracker, automatic review deadlines, dependency invalidation, a policy engine, or a workflow engine. Add these only when the pilot reveals a concrete need.
+The MVP includes a proposal-bound discussion log and an approval hold for a disputed contribution. Participants can append evidence, objections, and explicit agreement; only the configured reviewer can resolve, reject, or retain the hold. It does not include a claim graph, automatic contradiction detection, cross-contribution hold propagation, edge scoring, voting, an issue tracker, automatic review deadlines, dependency invalidation, a policy engine, or a workflow engine. Add these only when the pilot reveals a concrete need.
 
 ## Validation
 
@@ -25,6 +25,7 @@ Try a small document set with one designated reviewer. Check that readers recogn
 - [MVP design](docs/design.md)
 - [Plan](docs/plan.md)
 - [Implementation plan](docs/implementation-plan.md)
+- [Semantic conflict research and MVP design](docs/semantic-conflicts.md)
 
 `knowledge-model-horizon.md` and `sharepoint-transport-draft.md` are historical references, not a backlog or implementation requirements.
 
@@ -37,6 +38,20 @@ The wiki remains a Markdown file tree. See the [layer and adapter architecture](
 Wiki content and source evidence are local data, excluded from Git in `wiki/`, `wiki-en/`, `source/`, and `sources/`. Supply your own Markdown folder. `make run` defaults to `wiki-en`; override it with `make run WIKI=/path/to/wiki`.
 
 The web UI uses HTML, Pico CSS, and AlpineJS and runs on localhost through `wiki-worker ... web`.
+
+## Discussion API
+
+Discussions are durable SQLite records bound to a proposal's immutable `bundle_hash`; they are not Markdown wiki content. This keeps the worker as the workflow interface while preserving the debate and reviewer audit trail in persistent state. An open discussion blocks approval, and every write uses an expected `discussion_version` so a caller must reread after a concurrent entry.
+
+```text
+POST /api/discussion                         createDiscussion
+GET  /api/discussion/{proposalId}            getDiscussion
+POST /api/discussion/{proposalId}/messages   addDiscussionMessage
+POST /api/discussion/{proposalId}/hold       holdProposal
+POST /api/discussion/{proposalId}/resolve    resolveDiscussion
+```
+
+Creation accepts `{proposal_id, actor, bundle_hash, reason}`. Messages and holds also require `discussion_version`; a message may include `agrees_with` to reference an earlier sequence. Resolution requires the configured reviewer and a `decision` of `resolved`, `rejected`, or `on_hold`. `resolved` releases the hold; the other outcomes retain it. Review decisions also bind both discussion versions returned by the contribution read. The existing `/api/contribution/{id}/discussion` endpoint remains for backward-compatible reviewer-mediated semantic-conflict records.
 
 ## Two workflows: contributor and reviewer
 
@@ -53,3 +68,5 @@ python -m wiki_worker.cli --state .wiki-worker --folder wiki-en --reviewer revie
 ```
 
 Check browser file generation with `node tests/test_ui_file.js` and the workflow with `python -m unittest discover -s tests -v`.
+
+Run `make playground` for a disposable semantic-conflict demo. The Reviewer page includes a Proposal discussion panel for `redis-discussion`: create a debate, add evidence or agreement, and record the reviewer decision. The browser queue also starts with one open semantic dispute and one resolved case. The demo does not modify the real wiki folder.

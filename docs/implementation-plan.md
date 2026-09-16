@@ -22,6 +22,16 @@ Complete when authentication and overwrite protection are demonstrated. If no te
 
 Complete when the designated reviewer can review a proposal and every retry still refers to exactly one bundle.
 
+### Implemented MVP extension — semantic disputes
+
+- Store append-only semantic discussion events bound to one immutable contribution and its bundle hash.
+- Keep the dispute hold separate from contribution lifecycle and context freshness.
+- Bind a review decision to the discussion version that the reviewer saw; block approval while a hold is open, while allowing explicit rejection for revision.
+- Expose discussion actions in the reviewer API, CLI and web playground. Include one open and one resolved seeded case in the disposable demo.
+- Keep judgment with the reviewer. Do not add contradiction detection, a claim graph, voting, multi-user Talk, or cross-contribution hold propagation.
+
+Complete when restart/backup preserves the discussion, concurrent entries invalidate stale decisions, resolving never mutates the artifact, and the playground demonstrates both held and eligible proposals.
+
 ## Step 3 — Publish and recover
 
 - Add `publish` using the shared process lock. Persist target, artifact hash, and write conditions before the remote write, and use the conditional operation verified by the spike.

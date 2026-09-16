@@ -204,6 +204,22 @@ class Worker:
           CREATE TABLE IF NOT EXISTS history(id TEXT PRIMARY KEY, record TEXT);
           CREATE TABLE IF NOT EXISTS resolutions(
             id TEXT, actor TEXT, time TEXT, outcome TEXT, evidence TEXT);
+          CREATE TABLE IF NOT EXISTS semantic_discussions(
+            proposal_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+            actor TEXT NOT NULL, time TEXT NOT NULL, action TEXT NOT NULL,
+            reason TEXT NOT NULL, resolution_kind TEXT,
+            related_contribution_ids TEXT NOT NULL, bundle_hash TEXT NOT NULL,
+            PRIMARY KEY(proposal_id, sequence));
+          CREATE TABLE IF NOT EXISTS discussions(
+            proposal_id TEXT PRIMARY KEY, bundle_hash TEXT NOT NULL,
+            status TEXT NOT NULL, version INTEGER NOT NULL,
+            created_by TEXT NOT NULL, created_at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS discussion_events(
+            proposal_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+            actor TEXT NOT NULL, time TEXT NOT NULL, action TEXT NOT NULL,
+            message TEXT NOT NULL, agrees_with INTEGER, decision TEXT,
+            bundle_hash TEXT NOT NULL,
+            PRIMARY KEY(proposal_id, sequence));
         ''')
 
         proposal_context.initialize(self.db)
@@ -297,6 +313,8 @@ class Worker:
                     decision=parse(proposal['decision']) if proposal['decision'] else None,
                     resolutions=[dict(item) for item in self.db.execute(
                         'SELECT actor,time,outcome,evidence FROM resolutions WHERE id=? ORDER BY rowid', (row['id'],))],
+                    semantic_discussion=self.semantic_discussion(row['id']),
+                    discussion=self._workflow_discussion(proposal),
                     publication=parse(history['record']) if history else None,
                     diff=''.join(difflib.unified_diff((proposal['base'] or b'').decode().splitlines(True),
                         proposal['proposed'].decode().splitlines(True), fromfile='base', tofile='proposed'))))
@@ -359,6 +377,8 @@ class Worker:
                 (row['base'] or b'').decode().splitlines(True),
                 artifact.decode().splitlines(True), fromfile='base.md', tofile='artifact.md'))
             return dict(bundle_hash=row['bundle_hash'], artifact=artifact, time=stamp,
+                        **self.semantic_discussion(ident),
+                        **self._workflow_discussion(row),
                         diff=diff, reason=m['reason'], sources=m.get('sources', []),
                         scope_impact=m.get('scope_impact', []),
                         source_references=m.get('source_references', []),
@@ -372,6 +392,227 @@ class Worker:
         if actor == row['submitter']:
             raise Invalid('self-review is forbidden')
 
+    @staticmethod
+    def _discussion_actor(actor):
+        if (not isinstance(actor, str) or not actor.strip() or len(actor.encode()) > 200 or
+                any(character in actor for character in '\r\n<>')):
+            raise Invalid('valid discussion actor required')
+        return actor.strip()
+
+    @staticmethod
+    def _discussion_text(value, label):
+        if not isinstance(value, str) or not value.strip() or len(value.encode()) > LIMIT:
+            raise Invalid(f'{label} required')
+        return value
+
+    def _workflow_discussion(self, row):
+        """Return the durable, multi-party discussion for this frozen proposal.
+
+        This is deliberately separate from the legacy reviewer-mediated semantic
+        log.  Both logs are append-only and both may place an approval hold.
+        """
+        discussion = self.db.execute('SELECT * FROM discussions WHERE proposal_id=?',
+                                     (row['id'],)).fetchone()
+        if discussion is None:
+            return dict(discussion=None, discussion_history=[],
+                        workflow_discussion_version=0, discussion_hold=False)
+        if discussion['bundle_hash'] != row['bundle_hash']:
+            raise Invalid('discussion is bound to another bundle')
+        history = []
+        for event in self.db.execute(
+                '''SELECT sequence,actor,time,action,message,agrees_with,decision,bundle_hash
+                   FROM discussion_events WHERE proposal_id=? ORDER BY sequence''', (row['id'],)):
+            if event['bundle_hash'] != row['bundle_hash']:
+                raise Invalid('discussion event is bound to another bundle')
+            history.append({key: event[key] for key in
+                            ('sequence', 'actor', 'time', 'action', 'message', 'agrees_with', 'decision')})
+        if len(history) != discussion['version']:
+            raise Invalid('discussion history changed')
+        status = discussion['status']
+        if status not in ('open', 'resolved', 'rejected'):
+            raise Invalid('invalid discussion status')
+        return dict(
+            discussion=dict(proposal_id=row['id'], bundle_hash=discussion['bundle_hash'],
+                            status=status, version=discussion['version'],
+                            created_by=discussion['created_by'], created_at=discussion['created_at']),
+            discussion_history=history, workflow_discussion_version=discussion['version'],
+            # A rejection here records the debate outcome; final proposal state
+            # still changes only through the existing explicit review action.
+            discussion_hold=status != 'resolved')
+
+    def get_discussion(self, ident):
+        """Read one proposal discussion and its complete append-only history."""
+        with self.lock():
+            row = self.row(ident)
+            self.integrity(row)
+            return self._workflow_discussion(row)
+
+    def _current_discussion(self, ident, bundle_hash, version):
+        row = self.row(ident)
+        self.integrity(row)
+        if row['state'] != 'pending' or not isinstance(bundle_hash, str) or bundle_hash != row['bundle_hash']:
+            raise Invalid('discussion requires the current pending contribution')
+        current = self._workflow_discussion(row)
+        if current['discussion'] is None:
+            raise Invalid('discussion has not been created')
+        if type(version) is not int or version != current['workflow_discussion_version']:
+            raise Conflict('discussion changed; reread the discussion')
+        return row, current
+
+    def _append_discussion_event(self, row, current, actor, action, message,
+                                 agrees_with=None, decision=None, status=None):
+        sequence = current['workflow_discussion_version'] + 1
+        try:
+            with self.db:
+                if status is not None:
+                    update = self.db.execute('UPDATE discussions SET status=?,version=? WHERE proposal_id=? AND version=?',
+                                             (status, sequence, row['id'], current['workflow_discussion_version']))
+                    if update.rowcount != 1:
+                        raise sqlite3.IntegrityError()
+                else:
+                    update = self.db.execute('UPDATE discussions SET version=? WHERE proposal_id=? AND version=?',
+                                             (sequence, row['id'], current['workflow_discussion_version']))
+                    if update.rowcount != 1:
+                        raise sqlite3.IntegrityError()
+                self.db.execute('INSERT INTO discussion_events VALUES(?,?,?,?,?,?,?,?,?)',
+                                (row['id'], sequence, actor, now(), action, message, agrees_with,
+                                 decision, row['bundle_hash']))
+        except sqlite3.IntegrityError as exc:
+            raise Conflict('discussion changed; reread the discussion') from exc
+        return self._workflow_discussion(row)
+
+    def create_discussion(self, ident, actor, bundle_hash, reason):
+        """Open a proposal discussion. An unresolved discussion holds approval."""
+        with self.lock():
+            row = self.row(ident)
+            self.integrity(row)
+            actor = self._discussion_actor(actor)
+            reason = self._discussion_text(reason, 'discussion reason')
+            if row['state'] != 'pending' or not isinstance(bundle_hash, str) or bundle_hash != row['bundle_hash']:
+                raise Invalid('discussion requires the current pending contribution')
+            if self._workflow_discussion(row)['discussion'] is not None:
+                raise Invalid('discussion already exists; add a message or place it on hold')
+            try:
+                with self.db:
+                    self.db.execute('INSERT INTO discussions VALUES(?,?,?,?,?,?)',
+                                    (row['id'], row['bundle_hash'], 'open', 1, actor, now()))
+                    self.db.execute('INSERT INTO discussion_events VALUES(?,?,?,?,?,?,?,?,?)',
+                                    (row['id'], 1, actor, now(), 'open', reason, None, None,
+                                     row['bundle_hash']))
+            except sqlite3.IntegrityError as exc:
+                raise Conflict('discussion already exists; reread the discussion') from exc
+            return self._workflow_discussion(row)
+
+    def add_discussion_message(self, ident, actor, bundle_hash, version, message, agrees_with=None):
+        """Append evidence, an objection, or an explicit agreement to a discussion."""
+        with self.lock():
+            actor = self._discussion_actor(actor)
+            message = self._discussion_text(message, 'discussion message')
+            row, current = self._current_discussion(ident, bundle_hash, version)
+            if current['discussion']['status'] != 'open':
+                raise Invalid('discussion is resolved; reopen it before adding messages')
+            if agrees_with is not None:
+                if type(agrees_with) is not int or agrees_with < 1 or agrees_with > version:
+                    raise Invalid('agreement must reference an existing discussion entry')
+                action = 'agreement'
+            else:
+                action = 'message'
+            return self._append_discussion_event(row, current, actor, action, message, agrees_with)
+
+    def hold_proposal(self, ident, actor, bundle_hash, version, reason):
+        """Record that an existing unresolved discussion continues to hold approval."""
+        with self.lock():
+            actor = self._discussion_actor(actor)
+            reason = self._discussion_text(reason, 'hold reason')
+            row, current = self._current_discussion(ident, bundle_hash, version)
+            if current['discussion']['status'] != 'open':
+                raise Invalid('only an open discussion can be kept on hold')
+            return self._append_discussion_event(row, current, actor, 'hold', reason)
+
+    def resolve_discussion(self, ident, actor, bundle_hash, version, decision, reason):
+        """Have the configured human reviewer resolve, reject, or retain the hold."""
+        with self.lock():
+            row, current = self._current_discussion(ident, bundle_hash, version)
+            self.check_reviewer(row, actor)
+            reason = self._discussion_text(reason, 'discussion decision reason')
+            if decision not in ('resolved', 'rejected', 'on_hold'):
+                raise Invalid('discussion decision must be resolved, rejected, or on_hold')
+            if current['discussion']['status'] != 'open':
+                raise Invalid('only an open discussion can be decided')
+            # `on_hold` is an explicit reviewer decision but remains open, so
+            # participants can continue adding evidence.
+            return self._append_discussion_event(
+                row, current, actor, 'resolve' if decision == 'resolved' else decision,
+                reason, decision=decision, status='resolved' if decision == 'resolved'
+                else ('rejected' if decision == 'rejected' else 'open'))
+
+    def semantic_discussion(self, ident):
+        row = self.row(ident)
+        events = []
+        disputed = False
+        for item in self.db.execute(
+                '''SELECT sequence,actor,time,action,reason,resolution_kind,
+                   related_contribution_ids,bundle_hash
+                   FROM semantic_discussions WHERE proposal_id=? ORDER BY sequence''', (ident,)):
+            if item['bundle_hash'] != row['bundle_hash']:
+                raise Invalid('semantic discussion is bound to another bundle')
+            event = dict(item)
+            try:
+                event['related_contribution_ids'] = json.loads(event['related_contribution_ids'])
+            except (TypeError, ValueError) as exc:
+                raise Invalid('semantic discussion changed') from exc
+            events.append(event)
+            if item['action'] in ('open', 'reopen'):
+                disputed = True
+            elif item['action'] == 'resolve':
+                disputed = False
+        return dict(semantic_discussion=events,
+                    discussion_version=events[-1]['sequence'] if events else 0,
+                    disputed=disputed)
+
+    def discuss(self, ident, actor, bundle_hash, discussion_version, action, reason,
+                resolution_kind=None, related_contribution_ids=None):
+        """Append reviewer deliberation without changing the frozen proposal."""
+        with self.lock():
+            row = self.row(ident)
+            self.integrity(row)
+            self.check_reviewer(row, actor)
+            if row['state'] != 'pending' or bundle_hash != row['bundle_hash']:
+                raise Invalid('discussion requires the current pending contribution')
+            current = self.semantic_discussion(ident)
+            if type(discussion_version) is not int or discussion_version != current['discussion_version']:
+                raise Conflict('semantic discussion changed; reread the contribution')
+            if action not in ('open', 'comment', 'resolve', 'reopen'):
+                raise Invalid('invalid semantic discussion action')
+            if not isinstance(reason, str) or not reason.strip() or len(reason.encode()) > LIMIT:
+                raise Invalid('semantic discussion reason required')
+            related = [] if related_contribution_ids is None else related_contribution_ids
+            if (not isinstance(related, list) or len(related) > 50 or
+                    any(not isinstance(value, str) or
+                        not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', value)
+                        for value in related) or len(set(related)) != len(related)):
+                raise Invalid('related contribution IDs must be unique valid IDs')
+            if action == 'open' and current['semantic_discussion']:
+                raise Invalid('use reopen for a previously recorded discussion')
+            if action == 'reopen' and (not current['semantic_discussion'] or current['disputed']):
+                raise Invalid('only a resolved discussion can be reopened')
+            if action in ('comment', 'resolve') and not current['disputed']:
+                raise Invalid('open a semantic dispute before commenting or resolving')
+            allowed_resolutions = ('supported', 'scoped', 'attributed', 'not_a_conflict')
+            if action == 'resolve':
+                if resolution_kind not in allowed_resolutions:
+                    raise Invalid('resolution kind required')
+            elif resolution_kind is not None:
+                raise Invalid('resolution kind is only valid for resolve')
+            event = (ident, discussion_version + 1, actor, now(), action, reason,
+                     resolution_kind, json.dumps(related), row['bundle_hash'])
+            try:
+                with self.db:
+                    self.db.execute('INSERT INTO semantic_discussions VALUES(?,?,?,?,?,?,?,?,?)', event)
+            except sqlite3.IntegrityError as exc:
+                raise Conflict('semantic discussion changed; reread the contribution') from exc
+            return self.semantic_discussion(ident)
+
     def review(self, ident, actor, preview, approve, reason):
         with self.lock():
             row = self.row(ident)
@@ -379,6 +620,16 @@ class Worker:
             self.check_reviewer(row, actor)
             if row['state'] != 'pending' or preview['bundle_hash'] != row['bundle_hash']:
                 raise Invalid('review is no longer current')
+            discussion = self.semantic_discussion(ident)
+            if (type(preview.get('discussion_version')) is not int or
+                    preview['discussion_version'] != discussion['discussion_version']):
+                raise Conflict('semantic discussion changed; reread the contribution')
+            workflow_discussion = self._workflow_discussion(row)
+            if (type(preview.get('workflow_discussion_version')) is not int or
+                    preview['workflow_discussion_version'] != workflow_discussion['workflow_discussion_version']):
+                raise Conflict('discussion changed; reread the contribution')
+            if approve and (discussion['disputed'] or workflow_discussion['discussion_hold']):
+                raise Conflict('unresolved discussion blocks approval')
             if not reason.strip():
                 raise Invalid('decision reason required')
             artifact = self._artifact(row, actor, preview['time'])
@@ -388,6 +639,8 @@ class Worker:
             if approve and context is not None and proposal_context.freshness(self, context)['status'] != 'current':
                 raise Conflict('proposal context is stale; read new context and reassess')
             decision = dict(actor=actor, time=preview['time'], reason=reason, approved=approve,
+                            discussion_version=discussion['discussion_version'],
+                            workflow_discussion_version=workflow_discussion['workflow_discussion_version'],
                             bundle_hash=row['bundle_hash'], artifact_hash=digest(artifact))
             with self.db:
                 self.db.execute('''UPDATE proposals SET state=?,artifact=?,artifact_hash=?,decision=?
@@ -404,6 +657,8 @@ class Worker:
                       proposed_hash=digest(row['proposed']), artifact_hash=row['artifact_hash'],
                       decision=parse(row['decision']), prepared=parse(row['prepared']),
                       result=parse(row['result']), context=parse(row['manifest']).get('context'),
+                      semantic_discussion=self.semantic_discussion(ident),
+                      discussion=self._workflow_discussion(row),
                       published_version=published_version)
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO history VALUES(?,?)', (ident, json.dumps(record)))
@@ -483,8 +738,18 @@ class Worker:
                 self.finish(ident)
 
     def status(self):
-        return [dict(r) for r in self.db.execute(
-            'SELECT id,target,submitter,state,phase,error,bundle_hash,artifact_hash FROM proposals ORDER BY rowid')]
+        result = [dict(r) for r in self.db.execute(
+            '''SELECT id,target,submitter,state,phase,error,bundle_hash,artifact_hash,
+               COALESCE((SELECT action IN ('open','reopen') FROM semantic_discussions
+                 WHERE proposal_id=proposals.id AND action!='comment'
+                 ORDER BY sequence DESC LIMIT 1), 0) AS disputed
+               FROM proposals ORDER BY rowid''')]
+        for item in result:
+            row = self.row(item['id'])
+            workflow_discussion = self._workflow_discussion(row)
+            item['discussion_hold'] = workflow_discussion['discussion_hold']
+            item['disputed'] = bool(item['disputed']) or item['discussion_hold']
+        return result
 
     def detail(self, ident):
         """Return JSON-ready proposal data for trusted review interfaces."""
@@ -494,6 +759,8 @@ class Worker:
             manifest = parse(row['manifest'])
             return dict(id=row['id'], target=row['target'], submitter=row['submitter'],
                         state=row['state'], phase=row['phase'], error=row['error'],
+                        **self.semantic_discussion(ident),
+                        **self._workflow_discussion(row),
                         reason=manifest['reason'], sources=manifest.get('sources', []),
                         knowledge_change=manifest.get('knowledge_change'), context=manifest.get('context'),
                         context_documents=proposal_context.documents(self, manifest.get('context')),
@@ -513,6 +780,8 @@ class Worker:
             can_review = row['state'] == 'pending' and row['submitter'] != self.reviewer
             return dict(id=row['id'], target=row['target'], submitter=row['submitter'],
                         state=row['state'], phase=row['phase'], error=row['error'],
+                        **self.semantic_discussion(ident),
+                        **self._workflow_discussion(row),
                         reason=manifest['reason'], sources=manifest.get('sources', []),
                         scope_impact=manifest.get('scope_impact', []),
                         author_metadata=manifest.get('author_metadata', {}),

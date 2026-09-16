@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from wiki_worker.core import FixtureRemote, Invalid, Worker, digest
+from wiki_worker.core import Conflict, FixtureRemote, Invalid, Worker, digest
 
 
 class WorkflowTests(unittest.TestCase):
@@ -130,6 +130,58 @@ class WorkflowTests(unittest.TestCase):
         self.worker.review('p1', 'reviewer', preview, False, 'Needs changes')
         with self.assertRaises(Invalid):
             self.worker.review('p1', 'reviewer', preview, True, 'Old preview')
+
+    def test_semantic_dispute_blocks_approval_until_reasoned_resolution(self):
+        self.proposal()
+        original = self.worker.preview('p1', 'reviewer')
+        opened = self.worker.discuss(
+            'p1', 'reviewer', original['bundle_hash'], 0, 'open',
+            'Question: use Redis?\nClaim A: required\nClaim B: prohibited\nEvidence: source')
+        self.assertTrue(opened['disputed'])
+        self.assertEqual(opened['discussion_version'], 1)
+        with self.assertRaisesRegex(Conflict, 'discussion changed'):
+            self.worker.review('p1', 'reviewer', original, True, 'Old snapshot')
+        preview = self.worker.preview('p1', 'reviewer')
+        with self.assertRaisesRegex(Conflict, 'blocks approval'):
+            self.worker.review('p1', 'reviewer', preview, True, 'Choose claim A')
+        commented = self.worker.discuss(
+            'p1', 'reviewer', preview['bundle_hash'], 1, 'comment',
+            'No consensus: the effective policy is still missing')
+        self.assertTrue(commented['disputed'])
+        resolved = self.worker.discuss(
+            'p1', 'reviewer', preview['bundle_hash'], 2, 'resolve',
+            'The claims apply to cache and primary storage respectively.', 'scoped', ['p2'])
+        self.assertFalse(resolved['disputed'])
+        approved = self.worker.preview('p1', 'reviewer')
+        self.worker.review('p1', 'reviewer', approved, True, 'Scope is explicit')
+        decision = json.loads(self.worker.row('p1')['decision'])
+        self.assertEqual(decision['discussion_version'], 3)
+        self.assertEqual(self.worker.publish('p1'), 'published')
+        history = json.loads(self.worker.db.execute(
+            'SELECT record FROM history WHERE id=?', ('p1',)).fetchone()['record'])
+        self.assertEqual(history['semantic_discussion']['discussion_version'], 3)
+
+    def test_semantic_discussion_reopen_reject_and_restart(self):
+        self.proposal()
+        view = self.worker.preview('p1', 'reviewer')
+        self.worker.discuss('p1', 'reviewer', view['bundle_hash'], 0, 'open', 'Conflict found')
+        self.worker.discuss('p1', 'reviewer', view['bundle_hash'], 1, 'resolve',
+                            'Existing proposal is directly supported', 'supported')
+        self.worker.discuss('p1', 'reviewer', view['bundle_hash'], 2, 'reopen', 'New objection')
+        restarted = Worker(self.root / 'state', self.remote, 'reviewer')
+        self.addCleanup(restarted.db.close)
+        state = restarted.semantic_discussion('p1')
+        self.assertTrue(state['disputed'])
+        self.assertEqual(state['discussion_version'], 3)
+        backup = self.root / 'semantic-backup.sqlite'
+        restarted.backup(backup)
+        import sqlite3
+        with sqlite3.connect(backup) as database:
+            self.assertEqual(database.execute(
+                'SELECT COUNT(*) FROM semantic_discussions').fetchone()[0], 3)
+        rejected = restarted.preview('p1', 'reviewer')
+        restarted.review('p1', 'reviewer', rejected, False, 'Request a new contribution')
+        self.assertEqual(restarted.row('p1')['state'], 'rejected')
 
     def test_self_review_and_unknown_reviewer(self):
         self.proposal()

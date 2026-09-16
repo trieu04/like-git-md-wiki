@@ -19,6 +19,8 @@ Read [references/reviewer.md](references/reviewer.md) when assigned review. The 
 
 The reviewer reference separates worker usage, approval, merge and metadata rules. For concurrent edits, stale context or contradictory claims, also read [references/merge-conflicts.md](references/merge-conflicts.md) for classification and three-way merge steps. Author expertise means subject expertise, not automatic approval authority.
 
+For semantic/content disagreements, also read [references/semantic-conflicts.md](references/semantic-conflicts.md). It explains how to open a hold, record evidence, handle no consensus and resolve only an unchanged frozen proposal.
+
 The author and configured reviewer must be distinct identities. The worker enforces validity and records decisions; the agent assesses knowledge. Publication is a separate explicit action within the assigned workflow.
 
 ## Versions

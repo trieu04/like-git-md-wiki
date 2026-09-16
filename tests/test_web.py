@@ -115,6 +115,65 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result['state'], 'published')
         self.assertIn('# Updated', (self.root / 'wiki/index.md').read_text())
 
+    def test_semantic_discussion_api_holds_and_releases_approval(self):
+        self.ingest()
+        _, view = self.request('/api/contribution/contribution-1')
+        discussion = dict(actor='reviewer', bundle_hash=view['bundle_hash'],
+                          discussion_version=0, action='open',
+                          reason='Question: which deadline applies?',
+                          resolution_kind=None, related_contribution_ids=[])
+        _, opened = self.request('/api/contribution/contribution-1/discussion', 'POST', discussion)
+        self.assertTrue(opened['disputed'])
+        _, queued = self.request('/api/contribution')
+        self.assertTrue(queued[0]['disputed'])
+        with self.assertRaises(urllib.error.HTTPError):
+            self.request('/api/contribution/contribution-1/review', 'POST',
+                         {**view, 'actor': 'reviewer', 'reason': 'Approve', 'approve': True})
+        _, current = self.request('/api/contribution/contribution-1')
+        discussion.update(discussion_version=1, action='resolve',
+                          reason='The source directly supports this scope.',
+                          resolution_kind='supported')
+        _, resolved = self.request('/api/contribution/contribution-1/discussion', 'POST', discussion)
+        self.assertFalse(resolved['disputed'])
+        _, current = self.request('/api/contribution/contribution-1')
+        self.request('/api/contribution/contribution-1/review', 'POST',
+                     {**current, 'actor': 'reviewer', 'reason': 'Supported', 'approve': True})
+        _, saved = self.request('/api/contribution/contribution-1')
+        self.assertEqual(saved['decision']['discussion_version'], 2)
+
+    def test_workflow_discussion_keeps_multi_party_history_and_blocks_approval(self):
+        self.ingest()
+        _, view = self.request('/api/contribution/contribution-1')
+        status, opened = self.request('/api/discussion', 'POST', {
+            'proposal_id': 'contribution-1', 'actor': 'domain-expert',
+            'bundle_hash': view['bundle_hash'], 'reason': 'The source appears to conflict with the wording.'})
+        self.assertEqual(status, 201)
+        self.assertTrue(opened['discussion_hold'])
+        self.assertEqual(opened['discussion_history'][0]['action'], 'open')
+        _, message = self.request('/api/discussion/contribution-1/messages', 'POST', {
+            'actor': 'author', 'bundle_hash': view['bundle_hash'], 'discussion_version': 1,
+            'message': 'I agree that the source needs a narrower scope.', 'agrees_with': 1})
+        self.assertEqual(message['discussion_history'][-1]['action'], 'agreement')
+        self.assertEqual(message['discussion_history'][-1]['agrees_with'], 1)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.request('/api/contribution/contribution-1/review', 'POST',
+                         {**view, 'actor': 'reviewer', 'reason': 'Too early', 'approve': True})
+        _, held = self.request('/api/discussion/contribution-1/hold', 'POST', {
+            'actor': 'reviewer', 'bundle_hash': view['bundle_hash'], 'discussion_version': 2,
+            'reason': 'Need a cited policy passage before a decision.'})
+        self.assertEqual(held['discussion_history'][-1]['action'], 'hold')
+        _, resolved = self.request('/api/discussion/contribution-1/resolve', 'POST', {
+            'actor': 'reviewer', 'bundle_hash': view['bundle_hash'], 'discussion_version': 3,
+            'decision': 'resolved', 'reason': 'The proposed wording is now interpreted as scoped.'})
+        self.assertFalse(resolved['discussion_hold'])
+        self.assertEqual(resolved['discussion']['status'], 'resolved')
+        _, fetched = self.request('/api/discussion/contribution-1')
+        self.assertEqual(fetched, resolved)
+        _, current = self.request('/api/contribution/contribution-1')
+        self.assertFalse(current['discussion_hold'])
+        self.request('/api/contribution/contribution-1/review', 'POST',
+                     {**current, 'actor': 'reviewer', 'reason': 'Discussion resolved', 'approve': True})
+
     def test_versions_track_concurrent_edits_metadata_and_exact_artifacts(self):
         envelope = self.file().replace('| Reason | Source checked |',
             '| Reason | Source checked |\n| Author role | Engineer |\n| Author expert | Policies |')
@@ -325,6 +384,9 @@ vm.runInContext(fs.readFileSync('wiki_worker/static/app.js', 'utf8'), sandbox);
                 self.assertTrue(body.startswith(f'---\nname: wiki-{role}\n'))
                 self.assertIn(expected[role], body)
                 self.assertNotIn('## For reviewer' if role == 'contributor' else '# For agent contributor', body)
+                self.assertIn('# Merge and conflict logic', body)
+                if role == 'reviewer':
+                    self.assertIn('# Semantic content disputes', body)
         for path in ['/', '/app.js']:
             with urllib.request.urlopen(self.base + path) as response:
                 self.assertEqual(response.status, 200)

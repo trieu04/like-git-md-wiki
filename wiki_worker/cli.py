@@ -43,6 +43,13 @@ def main():
     review.add_argument('--actor', required=True, help='identity asserted by the trusted local caller')
     review.add_argument('--reason', required=True)
     review.add_argument('--reject', action='store_true')
+    discuss = sub.add_parser('discuss', help='record a semantic dispute, comment or resolution')
+    discuss.add_argument('id')
+    discuss.add_argument('--actor', required=True)
+    discuss.add_argument('--action', required=True, choices=['open', 'comment', 'resolve', 'reopen'])
+    discuss.add_argument('--reason', required=True)
+    discuss.add_argument('--resolution-kind', choices=['supported', 'scoped', 'attributed', 'not_a_conflict'])
+    discuss.add_argument('--related', action='append', default=[])
     publish = sub.add_parser('publish')
     publish.add_argument('id')
     sub.add_parser('status')
@@ -97,6 +104,8 @@ def main():
             print('Sources:', json.dumps(preview['sources'], ensure_ascii=False))
             print('Context:', json.dumps(preview['context_documents'], ensure_ascii=False))
             print('Context status:', json.dumps(preview['context_status'], ensure_ascii=False))
+            print('Semantic discussion:', json.dumps(preview['semantic_discussion'], ensure_ascii=False))
+            print('Disputed:', preview['disputed'])
             print(preview['diff'])
             print('Exact final artifact:\n' + preview['artifact'].decode())
             # No process lock held while a human reads and confirms.
@@ -106,6 +115,12 @@ def main():
                 return
             worker.review(args.id, args.actor, preview, not args.reject, args.reason)
             print('rejected' if args.reject else 'approved')
+        elif args.command == 'discuss':
+            proposal = worker.contribution(args.id)
+            result = worker.discuss(
+                args.id, args.actor, proposal['bundle_hash'], proposal['discussion_version'],
+                args.action, args.reason, args.resolution_kind, args.related)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         elif args.command == 'publish':
             print(worker.publish(args.id))
         elif args.command == 'status':

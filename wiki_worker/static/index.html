@@ -62,7 +62,7 @@
     <small x-show="!contributions.length" class="muted">No contributions yet.</small>
     <template x-for="item in contributions" :key="item.id">
       <button class="contribution-item outline" :class="contribution?.id === item.id ? 'is-selected' : ''" @click="openContribution(item.id)">
-        <span x-text="item.id"></span><br><small x-text="item.target + ' · ' + stateLabel(item.state)"></small>
+        <span x-text="item.id"></span><br><small x-text="item.target + ' · ' + stateLabel(item.state) + (item.disputed ? ' · Disputed' : '')"></small>
       </button>
     </template>
     <h6>Skill</h6>
@@ -143,7 +143,7 @@
       <div class="toolbar"><h3 style="margin:0">Imported contributions</h3><button class="outline" @click="refresh()">Refresh</button></div>
       <p x-show="!contributions.length" class="muted">No contributions yet.</p>
       <div class="queue" x-show="contributions.length"><table><thead><tr><th>ID</th><th>Document</th><th>Author</th><th>Status</th></tr></thead><tbody>
-        <template x-for="item in contributions" :key="item.id"><tr><td><a href="#" @click.prevent="openContribution(item.id)" x-text="item.id"></a></td><td x-text="item.target"></td><td x-text="item.submitter"></td><td x-text="stateLabel(item.state)"></td></tr></template>
+        <template x-for="item in contributions" :key="item.id"><tr><td><a href="#" @click.prevent="openContribution(item.id)" x-text="item.id"></a></td><td x-text="item.target"></td><td x-text="item.submitter"></td><td x-text="stateLabel(item.state) + (item.disputed ? ' · Disputed' : '')"></td></tr></template>
       </tbody></table></div>
       <template x-if="contribution"><article>
         <header><h3 x-text="contribution.id"></h3><span class="badge" x-text="stateLabel(contribution.state)"></span></header>
@@ -160,11 +160,66 @@
         <details open><summary>Proposed content</summary><article class="markdown-frame" x-html="markdownHtml(contribution.proposed)"></article></details>
         <details><summary>Text diff</summary><pre x-text="contribution.diff"></pre></details>
         <details open><summary>Exact artifact for review</summary><pre x-text="contribution.artifact || '(No artifact available)' "></pre></details>
+        <section>
+          <header><h4>Proposal discussion</h4><span class="badge" x-text="!contribution.discussion ? 'No discussion' : (contribution.discussion_hold ? 'Open · approval held' : 'Resolved · approval eligible')"></span></header>
+          <p class="muted">Use this panel as the debate record for this frozen proposal. Messages are append-only; a reviewer decision never changes the proposed Markdown.</p>
+          <template x-if="contribution.discussion">
+            <div>
+              <p><strong>Opened by:</strong> <span x-text="contribution.discussion.created_by"></span> · <strong>Version:</strong> <span x-text="contribution.workflow_discussion_version"></span></p>
+              <template x-for="entry in contribution.discussion_history" :key="entry.sequence"><details open>
+                <summary x-text="entry.sequence + ' · ' + entry.action + ' · ' + entry.actor + ' · ' + entry.time"></summary>
+                <pre x-text="entry.message"></pre>
+                <p x-show="entry.agrees_with !== null"><strong>Agrees with:</strong> <span x-text="entry.agrees_with"></span></p>
+                <p x-show="entry.decision"><strong>Reviewer decision:</strong> <span x-text="entry.decision"></span></p>
+              </details></template>
+              <form x-show="contribution.state === 'pending' && contribution.discussion.status === 'open'" @submit.prevent="addWorkflowMessage()">
+                <div class="grid"><label>Participant<input x-model.trim="workflowMessageActor" required placeholder="domain-expert"></label><label>Agree with entry <small>Optional sequence number.</small><input x-model.trim="workflowAgreesWith" inputmode="numeric" pattern="[1-9][0-9]*" placeholder="2"></label></div>
+                <label>Evidence, objection, or clarification<textarea x-model="workflowMessage" rows="4" required placeholder="Cite the source/version and explain its relevance."></textarea></label>
+                <button :disabled="busy" :aria-busy="busy">Add discussion message</button>
+              </form>
+              <form x-show="contribution.can_review && contribution.discussion.status === 'open'" @submit.prevent="resolveWorkflowDiscussion()">
+                <label>Reviewer outcome<select x-model="workflowDecision"><option value="on_hold">Keep on hold</option><option value="resolved">Resolve and release approval</option><option value="rejected">Reject outcome; retain hold</option></select></label>
+                <label>Decision rationale<textarea x-model="workflowDecisionReason" rows="4" required placeholder="State the evidence and reasoning for this decision."></textarea></label>
+                <button :disabled="busy" :aria-busy="busy">Record reviewer decision</button>
+              </form>
+            </div>
+          </template>
+          <form x-show="contribution.state === 'pending' && !contribution.discussion" @submit.prevent="createWorkflowDiscussion()">
+            <label>Participant opening the discussion<input x-model.trim="workflowActor" required placeholder="domain-expert"></label>
+            <label>Question, competing claims, and evidence<textarea x-model="workflowReason" rows="5" required placeholder="Question: …&#10;Claim A / Claim B: …&#10;Evidence: source@version and passage …"></textarea></label>
+            <button :disabled="busy" :aria-busy="busy">Open proposal discussion</button>
+          </form>
+        </section>
+        <section>
+          <header><h4>Semantic discussion</h4><span class="badge" x-text="contribution.disputed ? 'Open dispute · approval blocked' : (contribution.semantic_discussion.length ? 'Resolved for this proposal' : 'No dispute recorded')"></span></header>
+          <p x-show="contribution.disputed" class="error">The current proposal cannot be approved until the recorded objections are resolved. No consensus keeps the hold open.</p>
+          <template x-for="entry in contribution.semantic_discussion" :key="entry.sequence"><details open>
+            <summary x-text="entry.sequence + ' · ' + entry.action + (entry.resolution_kind ? ' · ' + entry.resolution_kind : '') + ' · ' + entry.actor + ' · ' + entry.time"></summary>
+            <pre x-text="entry.reason"></pre>
+            <p x-show="entry.related_contribution_ids.length"><strong>Related contributions:</strong> <span x-text="entry.related_contribution_ids.join(', ')"></span></p>
+          </details></template>
+          <form x-show="contribution.can_review" @submit.prevent="recordDiscussion()">
+            <label>Discussion action<select x-model="discussionAction">
+              <option value="open" :disabled="contribution.semantic_discussion.length">Open dispute</option>
+              <option value="comment" :disabled="!contribution.disputed">Add evidence or record no consensus</option>
+              <option value="resolve" :disabled="!contribution.disputed">Resolve for this exact proposal</option>
+              <option value="reopen" :disabled="!contribution.semantic_discussion.length || contribution.disputed">Reopen after new evidence</option>
+            </select></label>
+            <label x-show="discussionAction === 'resolve'">Resolution kind<select x-model="resolutionKind">
+              <option value="supported">Proposal supported</option><option value="scoped">Claims apply to different scopes</option>
+              <option value="attributed">Competing positions represented with attribution</option><option value="not_a_conflict">Not a semantic conflict</option>
+            </select></label>
+            <label>Related contribution IDs <small>Optional, comma separated.</small><input x-model="relatedContributionIds" placeholder="replacement-2, prior-option"></label>
+            <label>Claims, evidence and rationale<textarea x-model="discussionReason" rows="8" required placeholder="Question: …&#10;Claim A / Claim B: …&#10;Scope: …&#10;Evidence A/B: source@version and passage …&#10;Objections: …&#10;Outcome or missing evidence: …"></textarea></label>
+            <p class="muted">Resolving only removes the hold from these frozen bytes. If wording or evidence changes, create a new contribution.</p>
+            <button :disabled="busy" :aria-busy="busy">Record discussion</button>
+          </form>
+        </section>
         <form x-show="contribution.can_review" @submit.prevent="decide()">
           <p>Reviewer: <strong x-text="config.reviewer"></strong></p>
           <label>Decision<select x-model="decision"><option value="">Choose after review</option><option value="approve">Approve</option><option value="reject">Reject</option></select></label>
           <label>Decision reason<textarea x-model="decisionReason" rows="3" required></textarea></label>
-          <button :disabled="busy || !decision || (decision === 'approve' && contribution.context_status.status === 'stale')" :aria-busy="busy">Record decision</button>
+          <button :disabled="busy || !decision || (decision === 'approve' && (contribution.context_status.status === 'stale' || contribution.disputed || contribution.discussion_hold))" :aria-busy="busy">Record decision</button>
         </form>
         <p x-show="contribution.state === 'pending' && !contribution.can_review">Authors cannot review their own contributions.</p>
         <div x-show="contribution.state === 'approved'"><p>Publish the exact approved artifact; check the base content and sources again before writing.</p><button @click="publish()" :disabled="busy" :aria-busy="busy">Publish</button></div>

@@ -48,6 +48,8 @@ change the ID when revising a proposal. A repeated scan validates the incoming
 payload again; later review and publish use the frozen bytes, never inbox files.
 Use `review --reject` to reject. Neither rejected nor stale proposals can publish.
 
+For a semantic/content disagreement, use `discuss ID --action open` to place an approval hold, `comment` to append evidence or record no consensus, and `resolve --resolution-kind ...` only when the exact frozen proposal is supported. `reopen` restores a resolved hold after new objections. A review is bound to the discussion version it displayed; an intervening entry requires rereading. Open disputes can be rejected to request revision but cannot be approved.
+
 The CLI displays reason, sources, diff and complete final artifact before asking
 for confirmation. It releases the lock while waiting and rechecks state when
 saving the decision. Worker state belongs to a trusted OS account. Contributors
@@ -156,4 +158,8 @@ have been claimed or verified by this implementation.
 
 See [agent workflow](agent-workflow.md) for the contributor and reviewer skills. Contributors discover files directly, run `context TARGET --source SOURCE`, then create a `.contribution.md` file whose scope table lists the primary file first and all related or impacted files with versions. `scan PATH --submitter AUTHOR` ingests that file or a compatible directory bundle; the reviewer UI can import the Markdown file too. No author HTTP submission endpoint is provided. Reviewer reads use `/api/contribution/ID`, which includes the exact artifact; decisions and publication use `/review` and `/publish` under that path. Outdated context is rejected rather than silently rebased. The configured reviewer must be distinct from the contributor. The worker does not run a model, schedule reviews or decide approval itself.
 
-The SQLite backup now also includes `document_versions`, the immutable observed source snapshots. Version labels use UTC observation dates and per-document daily sequences, not publication or effective dates. Legacy proposals without context are reported as unversioned.
+The SQLite backup now also includes `document_versions`, the immutable observed source snapshots, and the append-only semantic discussion log. Version labels use UTC observation dates and per-document daily sequences, not publication or effective dates. Legacy proposals without context are reported as unversioned.
+
+## Semantic-conflict playground
+
+Run `make playground` and open the printed localhost URL. The disposable demo contains two pending proposals against the same sample policy: one has an open dispute and one has a resolved, scoped discussion. Use the reviewer page to add comments, resolve or reopen the hold, reject a revision request, approve an eligible proposal and publish it. The temporary wiki and SQLite state are removed when the server exits; this command never writes `wiki-en`.

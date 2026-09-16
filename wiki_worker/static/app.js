@@ -4,6 +4,9 @@ function wikiApp() {
     notice: '', error: false, busy: false, generated: null,
     form: {id: '', submitter: '', reason: '', content: '', scopeFiles: '', sourceFiles: '', editMode: '', before: '', change: ''},
     contributions: [], contribution: null, contributionId: '', decision: '', decisionReason: '',
+    discussionAction: 'open', discussionReason: '', resolutionKind: 'supported', relatedContributionIds: '',
+    workflowActor: '', workflowReason: '', workflowMessageActor: '', workflowMessage: '',
+    workflowAgreesWith: '', workflowDecision: 'on_hold', workflowDecisionReason: '',
     importText: '', importAuthor: '', wikiPaths: [], documentContent: '', selectedPath: '', selectedReference: null,
     collapsedFolders: [],
     async init() {
@@ -169,10 +172,75 @@ function wikiApp() {
     },
     async openContribution(id) {
       this.clear(); this.contribution = null; this.decision = ''; this.decisionReason = '';
+      this.discussionReason = ''; this.relatedContributionIds = ''; this.resolutionKind = 'supported';
+      this.workflowReason = ''; this.workflowMessage = ''; this.workflowAgreesWith = '';
+      this.workflowDecision = 'on_hold'; this.workflowDecisionReason = '';
       try {
-        this.contribution = await this.request('/api/contribution/' + encodeURIComponent(id));
+        const [contribution, discussion] = await Promise.all([
+          this.request('/api/contribution/' + encodeURIComponent(id)),
+          this.request('/api/discussion/' + encodeURIComponent(id))]);
+        this.contribution = {...contribution, ...discussion};
+        this.workflowActor = this.workflowActor || this.config.reviewer;
+        this.workflowMessageActor = this.workflowMessageActor || this.contribution.submitter;
+        this.discussionAction = !this.contribution.semantic_discussion.length
+          ? 'open' : (this.contribution.disputed ? 'comment' : 'reopen');
         this.contributionId = id; this.view = 'review';
       } catch (e) { this.fail(e); }
+    },
+    async recordDiscussion() {
+      if (!this.discussionReason.trim()) return;
+      this.busy = true; this.clear();
+      try {
+        const c = this.contribution;
+        const related = this.relatedContributionIds.split(',').map(value => value.trim()).filter(Boolean);
+        await this.request(`/api/contribution/${encodeURIComponent(c.id)}/discussion`, {method: 'POST', body: JSON.stringify({
+          actor: this.config.reviewer, bundle_hash: c.bundle_hash,
+          discussion_version: c.discussion_version, action: this.discussionAction,
+          reason: this.discussionReason,
+          resolution_kind: this.discussionAction === 'resolve' ? this.resolutionKind : null,
+          related_contribution_ids: related})});
+        await this.refresh(); await this.openContribution(c.id);
+        this.notice = 'Semantic discussion recorded. Review and publication remain separate actions.';
+      } catch (e) { this.fail(e); } finally { this.busy = false; }
+    },
+    async createWorkflowDiscussion() {
+      if (!this.workflowReason.trim()) return;
+      this.busy = true; this.clear();
+      try {
+        const c = this.contribution;
+        await this.request('/api/discussion', {method: 'POST', body: JSON.stringify({
+          proposal_id: c.id, actor: this.workflowActor, bundle_hash: c.bundle_hash,
+          reason: this.workflowReason})});
+        await this.refresh(); await this.openContribution(c.id);
+        this.notice = 'Proposal discussion opened. Approval is held until the reviewer resolves it.';
+      } catch (e) { this.fail(e); } finally { this.busy = false; }
+    },
+    async addWorkflowMessage() {
+      if (!this.workflowMessage.trim()) return;
+      this.busy = true; this.clear();
+      try {
+        const c = this.contribution;
+        const agreement = this.workflowAgreesWith.trim();
+        await this.request(`/api/discussion/${encodeURIComponent(c.id)}/messages`, {method: 'POST', body: JSON.stringify({
+          actor: this.workflowMessageActor, bundle_hash: c.bundle_hash,
+          discussion_version: c.workflow_discussion_version, message: this.workflowMessage,
+          agrees_with: agreement ? Number(agreement) : null})});
+        await this.refresh(); await this.openContribution(c.id);
+        this.notice = 'Discussion message recorded.';
+      } catch (e) { this.fail(e); } finally { this.busy = false; }
+    },
+    async resolveWorkflowDiscussion() {
+      if (!this.workflowDecisionReason.trim()) return;
+      this.busy = true; this.clear();
+      try {
+        const c = this.contribution;
+        await this.request(`/api/discussion/${encodeURIComponent(c.id)}/resolve`, {method: 'POST', body: JSON.stringify({
+          actor: this.config.reviewer, bundle_hash: c.bundle_hash,
+          discussion_version: c.workflow_discussion_version, decision: this.workflowDecision,
+          reason: this.workflowDecisionReason})});
+        await this.refresh(); await this.openContribution(c.id);
+        this.notice = 'Reviewer discussion decision recorded.';
+      } catch (e) { this.fail(e); } finally { this.busy = false; }
     },
     async decide() {
       if (!this.decision || !this.decisionReason.trim()) return;
@@ -181,7 +249,9 @@ function wikiApp() {
         const c = this.contribution;
         await this.request(`/api/contribution/${encodeURIComponent(c.id)}/review`, {method: 'POST', body: JSON.stringify({
           bundle_hash: c.bundle_hash, time: c.time, artifact: c.artifact, actor: this.config.reviewer,
-          reason: this.decisionReason, approve: this.decision === 'approve'})});
+          reason: this.decisionReason, approve: this.decision === 'approve',
+          discussion_version: c.discussion_version,
+          workflow_discussion_version: c.workflow_discussion_version})});
         await this.refresh(); await this.openContribution(c.id); this.notice = 'Reviewer decision recorded.';
       } catch (e) { this.fail(e); } finally { this.busy = false; }
     },

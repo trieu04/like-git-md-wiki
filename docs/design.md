@@ -43,7 +43,15 @@ The localhost web UI/API supports file ingestion, reading contributions with art
 
 When a timeout or crash leaves the write outcome unknown, block all publication to that target while investigating remote storage/history; other files may proceed. After restart, resolve incomplete writes before accepting new publications to that target. Matching hashes prove content equality, not that a particular operation committed. The operator records evidence and a written/not-written conclusion before unblocking; unresolved cases remain blocked. Automatic reconciliation of every case is unnecessary for now. Do not blindly retry writes, obtain a new ETag to bypass the original condition, or roll back blindly.
 
-Minimum states: `pending`, `approved`, `published`, `rejected`, and `stale`. Store publication phases, transient errors, and investigation flags separately. Investigation blocks publication until a conclusion is recorded. If the base changes before writing, mark `stale` and require a new proposal. An unknown write outcome is neither stale nor published. `published` records a historical publication; it does not mean the remote file remains at that version forever.
+Minimum states: `pending`, `approved`, `published`, `rejected`, and `stale`. Store publication phases, transient errors, investigation flags and the semantic dispute hold separately. Investigation blocks publication until a conclusion is recorded. An open semantic dispute blocks approval but still permits rejection with a revision request. If the base changes before writing, mark `stale` and require a new proposal. An unknown write outcome is neither stale nor published. `published` records a historical publication; it does not mean the remote file remains at that version forever.
+
+## Semantic content disputes
+
+The MVP records a reviewer-mediated discussion against one immutable contribution. Each event stores an ordered sequence, configured reviewer, server time, action, rationale, optional resolution kind and related contribution IDs, bound to the proposal's bundle hash. `open` and `reopen` establish an approval hold; `comment` preserves it; `resolve` removes it from the unchanged proposal without editing or approving anything.
+
+Contribution reads return the complete discussion, its version and the derived hold. Review decisions must include the version displayed to the reviewer, so a concurrent objection invalidates an older decision attempt. No consensus remains an open hold. Changed wording or new evidence requires a new contribution and fresh review.
+
+The worker does not detect contradictions, evaluate evidence, contact domain experts, count votes, or propagate a hold across proposals. The current localhost trust boundary permits only the configured reviewer to record discussion events. See [semantic conflict research and design](semantic-conflicts.md) for rationale and limits.
 
 ## Reader status and corrections
 
