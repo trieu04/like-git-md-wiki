@@ -52,6 +52,26 @@ class WorkflowTests(unittest.TestCase):
         self.worker.publish('p1')
         self.assertEqual(self.worker.publish('p2'), 'stale')
 
+    def test_reviewer_resolves_conflict_from_frozen_base_into_fresh_proposal(self):
+        self.remote.write('page.md', b'v1\n', None)
+        self.proposal('a', base=b'v1\n', content=b'v1\nA\n')
+        self.proposal('b', base=b'v1\n', content=b'v1\nB\n')
+        self.approve('a'); self.approve('b')
+        self.assertEqual(self.worker.publish('a'), 'published')
+
+        conflict = self.worker.contribution('b')['conflict']
+        self.assertEqual(conflict['base_content'], 'v1\n')
+        self.assertEqual(conflict['current_contribution_id'], 'a')
+        self.assertEqual(conflict['current_content'].splitlines()[-1], 'A')
+
+        result = self.worker.resolve_conflict(
+            'b', 'reviewer', 'merge', 'Keep both compatible additions', 'v1\nA\nB\n')
+        replacement = result['replacement_id']
+        self.assertEqual(self.worker.row('b')['state'], 'rejected')
+        self.assertEqual(self.worker.row(replacement)['state'], 'pending')
+        self.assertEqual(self.worker.row(replacement)['base'], self.remote.read('page.md')['content'])
+        self.assertEqual(self.worker.row(replacement)['proposed'], b'v1\nA\nB\n')
+
     def test_race_after_read_cannot_overwrite(self):
         self.remote.write('page.md', b'Base', None)
         self.proposal(base=b'Base')

@@ -14,7 +14,7 @@ The MVP needs to prove one workflow: **submit a change → designated reviewer r
 - Retain earlier content, submitter, reviewer, and timestamps for auditing. Corrections require new proposals; restoration also goes through version checks.
 - Clearly show whether a document is unreviewed or a particular version has been reviewed, and identify the responsible person. A review label does not guarantee absolute correctness.
 
-The MVP includes a proposal-bound discussion log and an approval hold for a disputed contribution. Participants can append evidence, objections, and explicit agreement; only the configured reviewer can resolve, reject, or retain the hold. It does not include a claim graph, automatic contradiction detection, cross-contribution hold propagation, edge scoring, voting, an issue tracker, automatic review deadlines, dependency invalidation, a policy engine, or a workflow engine. Add these only when the pilot reveals a concrete need.
+Conflicts are handled against the frozen three-way base: if B was authored from v1 after A published v2, the wiki is never destructively rolled back. The reviewer sees v1, v2 and B, then keeps v2, accepts B as a fresh v2-based proposal, or supplies a merged proposal. The old contribution is closed and any replacement receives a fresh review. Discussions are separate file/section-anchored records; they are not embedded in a contribution.
 
 ## Validation
 
@@ -41,7 +41,9 @@ The web UI uses HTML, Pico CSS, and AlpineJS and runs on localhost through `wiki
 
 ## Discussion API
 
-Discussions are durable SQLite records bound to a proposal's immutable `bundle_hash`; they are not Markdown wiki content. This keeps the worker as the workflow interface while preserving the debate and reviewer audit trail in persistent state. An open discussion blocks approval, and every write uses an expected `discussion_version` so a caller must reread after a concurrent entry.
+Discussions are durable SQLite records anchored to `project_id`, `document_path`, and `section_anchor`; they are not Markdown wiki content or contribution fields. Create them with `POST /api/discussions`, list/filter with `GET /api/discussions`, and reply with `POST /api/discussions/{id}/comments`.
+
+Conflict resolution uses `POST /api/contribution/{id}/conflict` with `outcome` `keep_current`, `use_incoming`, or `merge`. The latter two create a new pending contribution against the current v2.
 
 ```text
 POST /api/discussion                         createDiscussion
@@ -69,4 +71,4 @@ python -m wiki_worker.cli --state .wiki-worker --folder wiki-en --reviewer revie
 
 Check browser file generation with `node tests/test_ui_file.js` and the workflow with `python -m unittest discover -s tests -v`.
 
-Run `make playground` for a disposable semantic-conflict demo. The Reviewer page includes a Proposal discussion panel for `redis-discussion`: create a debate, add evidence or agreement, and record the reviewer decision. The browser queue also starts with one open semantic dispute and one resolved case. The demo does not modify the real wiki folder.
+Run `make playground` for a disposable reviewer-workflow demo. It includes three contributions created from the same v1 (A is published as v2 while B and C retain concurrent-change evidence) and an explicit `X is blue` versus `X is red` semantic conflict. Follow [the reviewer demo runbook](docs/reviewer-demo-runbook.md). New discussions are reviewer-opened and anchored to a file/section. The demo does not modify the real wiki folder.

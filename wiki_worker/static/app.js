@@ -7,7 +7,9 @@ function wikiApp() {
     discussionAction: 'open', discussionReason: '', resolutionKind: 'supported', relatedContributionIds: '',
     workflowActor: '', workflowReason: '', workflowMessageActor: '', workflowMessage: '',
     workflowAgreesWith: '', workflowDecision: 'on_hold', workflowDecisionReason: '',
+    conflictOutcome: 'keep_current', conflictReason: '', mergedContent: '',
     importText: '', importAuthor: '', wikiPaths: [], documentContent: '', selectedPath: '', selectedReference: null,
+    discussions: [], discussionForm: {project_id:'wiki', document_path:'', section_anchor:'file', topic_id:'', author:'', body:''},
     collapsedFolders: [],
     async init() {
       try { this.config = await this.request('/api/config'); await this.refresh(); }
@@ -59,6 +61,23 @@ function wikiApp() {
         const document = await this.request('/api/wiki/document?path=' + encodeURIComponent(path));
         this.documentContent = document.content; this.selectedReference = document.reference; this.view = 'document';
       } catch (e) { this.fail(e); }
+    },
+    async openDiscussions() {
+      this.clear();
+      this.discussionForm.document_path = this.selectedPath || this.discussionForm.document_path;
+      try { this.discussions = await this.request('/api/discussions' + (this.discussionForm.document_path ? '?document_path=' + encodeURIComponent(this.discussionForm.document_path) : '')); this.view = 'discussions'; }
+      catch (e) { this.fail(e); }
+    },
+    async createTopic() {
+      this.busy = true; this.clear();
+      try { await this.request('/api/discussions', {method:'POST', body:JSON.stringify(this.discussionForm)}); await this.openDiscussions(); this.notice='Discussion opened.'; }
+      catch (e) { this.fail(e); } finally { this.busy = false; }
+    },
+    async commentTopic(topic) {
+      if (!topic.reply?.trim()) return;
+      this.busy = true; this.clear();
+      try { await this.request('/api/discussions/' + encodeURIComponent(topic.discussion_id) + '/comments', {method:'POST', body:JSON.stringify({author:this.discussionForm.author || this.config.reviewer, body:topic.reply, topic_id:topic.topic_id, section_anchor:topic.section_anchor})}); await this.openDiscussions(); }
+      catch (e) { this.fail(e); } finally { this.busy = false; }
     },
     async openSkill(role) {
       this.clear(); this.skillRole = role; this.skillContent = '';
@@ -175,15 +194,12 @@ function wikiApp() {
       this.discussionReason = ''; this.relatedContributionIds = ''; this.resolutionKind = 'supported';
       this.workflowReason = ''; this.workflowMessage = ''; this.workflowAgreesWith = '';
       this.workflowDecision = 'on_hold'; this.workflowDecisionReason = '';
+      this.conflictOutcome = 'keep_current'; this.conflictReason = ''; this.mergedContent = '';
       try {
-        const [contribution, discussion] = await Promise.all([
-          this.request('/api/contribution/' + encodeURIComponent(id)),
-          this.request('/api/discussion/' + encodeURIComponent(id))]);
-        this.contribution = {...contribution, ...discussion};
+        const contribution = await this.request('/api/contribution/' + encodeURIComponent(id));
+        this.contribution = contribution;
         this.workflowActor = this.workflowActor || this.config.reviewer;
         this.workflowMessageActor = this.workflowMessageActor || this.contribution.submitter;
-        this.discussionAction = !this.contribution.semantic_discussion.length
-          ? 'open' : (this.contribution.disputed ? 'comment' : 'reopen');
         this.contributionId = id; this.view = 'review';
       } catch (e) { this.fail(e); }
     },
@@ -253,6 +269,19 @@ function wikiApp() {
           discussion_version: c.discussion_version,
           workflow_discussion_version: c.workflow_discussion_version})});
         await this.refresh(); await this.openContribution(c.id); this.notice = 'Reviewer decision recorded.';
+      } catch (e) { this.fail(e); } finally { this.busy = false; }
+    },
+    async resolveConflict() {
+      if (!this.conflictReason.trim()) return;
+      this.busy = true; this.clear();
+      try {
+        const c = this.contribution;
+        const result = await this.request(`/api/contribution/${encodeURIComponent(c.id)}/conflict`, {method:'POST', body:JSON.stringify({
+          actor: this.config.reviewer, outcome: this.conflictOutcome, reason: this.conflictReason,
+          merged_content: this.conflictOutcome === 'merge' ? this.mergedContent : null})});
+        await this.refresh();
+        this.notice = result.replacement_id ? `Conflict resolved. New contribution ${result.replacement_id} is pending review.` : 'Conflict resolved; the current v2 was kept.';
+        await this.openContribution(c.id);
       } catch (e) { this.fail(e); } finally { this.busy = false; }
     },
     async publish() {

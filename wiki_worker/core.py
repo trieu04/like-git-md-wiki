@@ -186,12 +186,13 @@ def validate_bundle(raw, base, proposed):
 
 
 class Worker:
-    def __init__(self, root, remote: WikiStorage, reviewer, owner='Pilot owner'):
+    def __init__(self, root, remote: WikiStorage, reviewer, owner='Pilot owner', slack=None):
         if not reviewer or any(c in owner + reviewer for c in '\r\n<>'):
             raise Invalid('invalid owner or reviewer')
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.remote, self.reviewer, self.owner = remote, reviewer, owner
+        self.slack = slack
         self.db = sqlite3.connect(self.root / 'state.sqlite')
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA synchronous=FULL')
@@ -220,9 +221,34 @@ class Worker:
             message TEXT NOT NULL, agrees_with INTEGER, decision TEXT,
             bundle_hash TEXT NOT NULL,
             PRIMARY KEY(proposal_id, sequence));
+          CREATE TABLE IF NOT EXISTS discussion_topics(
+            discussion_id TEXT PRIMARY KEY, project_id TEXT, document_path TEXT NOT NULL,
+            section_anchor TEXT NOT NULL, topic_id TEXT NOT NULL, parent_topic_id TEXT,
+            proposal_id TEXT, author TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_refs TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS discussion_comments(
+            discussion_id TEXT NOT NULL, comment_id TEXT NOT NULL, parent_comment_id TEXT,
+            topic_id TEXT NOT NULL, section_anchor TEXT NOT NULL, proposal_id TEXT,
+            author TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_ref TEXT,
+            PRIMARY KEY(discussion_id, comment_id));
+          CREATE TABLE IF NOT EXISTS conflict_resolutions(
+            proposal_id TEXT PRIMARY KEY, actor TEXT NOT NULL, outcome TEXT NOT NULL,
+            base_hash TEXT NOT NULL, current_hash TEXT NOT NULL, replacement_id TEXT,
+            reason TEXT NOT NULL, created_at TEXT NOT NULL);
         ''')
 
         proposal_context.initialize(self.db)
+        for column in ('slack_channel', 'slack_thread_ts', 'discord_channel', 'discord_thread_id'):
+            try:
+                self.db.execute(f'ALTER TABLE discussions ADD COLUMN {column} TEXT')
+            except sqlite3.OperationalError:
+                pass
+        for column in ('slack_channel', 'slack_thread_ts', 'reviewer_notified'):
+            try:
+                self.db.execute(f'ALTER TABLE discussion_topics ADD COLUMN {column} TEXT')
+            except sqlite3.OperationalError:
+                pass
 
     @contextlib.contextmanager
     def lock(self):
@@ -440,11 +466,283 @@ class Worker:
             # still changes only through the existing explicit review action.
             discussion_hold=status != 'resolved')
 
+    def discussion_topics(self, project_id=None, document_path=None, section_anchor=None, topic_id=None):
+        """Read the canonical topic/comment store, independent of proposal lifecycle."""
+        clauses, args = [], []
+        for name, value in (('project_id', project_id), ('document_path', document_path),
+                            ('section_anchor', section_anchor), ('topic_id', topic_id)):
+            if value is not None:
+                clauses.append(name + '=?'); args.append(value)
+        where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+        topics = [dict(r) for r in self.db.execute('SELECT * FROM discussion_topics' + where + ' ORDER BY created_at', args)]
+        for topic in topics:
+            topic['source_refs'] = json.loads(topic['source_refs'])
+            topic['comments'] = [dict(r) for r in self.db.execute(
+                'SELECT * FROM discussion_comments WHERE discussion_id=? ORDER BY created_at', (topic['discussion_id'],))]
+        return topics
+
+    def create_topic(self, project_id, document_path, section_anchor, topic_id, author,
+                     body, parent_topic_id=None, proposal_id=None, source_refs=None,
+                     status='open', discussion_id=None):
+        """Create an anchor/topic discussion without requiring a proposal."""
+        values = (project_id, document_path, section_anchor, topic_id, author, body)
+        if any(not isinstance(v, str) or not v.strip() for v in values):
+            raise Invalid('project_id, document_path, section_anchor, topic_id, author and body are required')
+        if status not in ('open', 'resolved', 'blocked', 'decision'):
+            raise Invalid('invalid topic status')
+        discussion_id = discussion_id or digest((project_id + document_path + topic_id + now()).encode())[:24]
+        stamp = now()
+        thread = None
+        if self.slack is not None and hasattr(self.slack, 'open_topic'):
+            thread = self.slack.open_topic(discussion_id, document_path, section_anchor, body)
+        with self.db:
+            self.db.execute('''INSERT INTO discussion_topics
+                (discussion_id,project_id,document_path,section_anchor,topic_id,parent_topic_id,proposal_id,author,body,status,created_at,updated_at,source_refs,slack_channel,slack_thread_ts,reviewer_notified)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                            (discussion_id, project_id, document_path, section_anchor, topic_id,
+                             parent_topic_id, proposal_id, author, body, status, stamp, stamp,
+                             json.dumps(source_refs or []),
+                             thread['channel'] if thread else None,
+                             thread['thread_ts'] if thread else None, None))
+        return discussion_id
+
+    def open_concurrent_discussion(self, proposal_id, actor, section_anchor, reason,
+                                   related_proposal_ids=None, project_id='wiki'):
+        """Reviewer-only action: open one discussion for a file/section.
+
+        Stale detection never calls this method.  The anchor is the stable
+        identity, so proposals for the same file and section share one topic
+        and one Slack root thread.
+        """
+        self.check_reviewer(self.row(proposal_id), actor)
+        if not isinstance(section_anchor, str) or not section_anchor.strip() or not isinstance(reason, str) or not reason.strip():
+            raise Invalid('section anchor and reason required')
+        if related_proposal_ids is not None and not isinstance(related_proposal_ids, list):
+            raise Invalid('related proposal IDs must be a list')
+        row = self.row(proposal_id)
+        ids = list(dict.fromkeys([proposal_id] + list(related_proposal_ids or [])))
+        evidence = []
+        for related in ids:
+            related_row = self.row(related)
+            if related_row['target'] != row['target']:
+                raise Invalid('all linked contributions must target the discussion document')
+            manifest = parse(related_row['manifest'])
+            evidence.append(
+                f'- `{related}`: base `{manifest["base_hash"] or "new file"}`; '
+                f'proposal `{manifest["proposed_hash"]}`; author claim: {manifest["reason"]}')
+        body = (f'## What is being discussed\n\n{reason.strip()}\n\n'
+                f'**Scope:** `{row["target"]}#{section_anchor}`\n\n'
+                '**Related contributions and frozen evidence**\n\n' + '\n'.join(evidence))
+        topic = self.db.execute(
+            'SELECT * FROM discussion_topics WHERE document_path=? AND section_anchor=? ORDER BY created_at LIMIT 1',
+            (row['target'], section_anchor)).fetchone()
+        if topic is None:
+            discussion_id = 'concurrent-' + digest((row['target'] + '\0' + section_anchor).encode())[:24]
+            ident = self.create_topic(project_id, row['target'], section_anchor, discussion_id,
+                                      actor, body, proposal_id=proposal_id,
+                                      discussion_id=discussion_id)
+        else:
+            ident = topic['discussion_id']
+            self.add_discussion_comment(ident, actor, body, topic['topic_id'],
+                                        section_anchor, proposal_id)
+        for related in ids:
+            exists = self.db.execute(
+                'SELECT 1 FROM discussion_comments WHERE discussion_id=? AND proposal_id=?',
+                (ident, related)).fetchone()
+            if not exists:
+                self.add_discussion_comment(ident, actor,
+                    f'Linked contribution: `{related}`',
+                    self.db.execute('SELECT topic_id FROM discussion_topics WHERE discussion_id=?', (ident,)).fetchone()['topic_id'],
+                    section_anchor, related)
+        return self.discussion_topics(topic_id=ident)[0]
+
+    def rollback_to_base(self, proposal_id, actor, reason, expected_v2_hash=None):
+        """Explicit reviewer rollback of v2 to the frozen v1, conditionally."""
+        with self.lock():
+            row = self.row(proposal_id)
+            self.check_reviewer(row, actor)
+            if not isinstance(reason, str) or not reason.strip() or row['base'] is None:
+                raise Invalid('reviewer, rollback reason and v1 base required')
+            current = self.remote.read(row['target'])
+            expected_hash = digest(current['content']) if current else None
+            manifest = parse(row['manifest'])
+            if current is None or expected_hash == manifest['base_hash']:
+                raise Invalid('current file is not v2; rollback refused')
+            if expected_v2_hash is not None and expected_hash != expected_v2_hash:
+                raise Conflict('current file changed after reviewer evidence; reread before rollback')
+            condition = [current['item'], current['version']]
+            result = self.remote.write(row['target'], row['base'], condition)
+            if result['hash'] != manifest['base_hash'] or not self.remote.verify(result):
+                raise Invalid('rollback result could not be verified')
+            with self.db:
+                self.db.execute('INSERT OR REPLACE INTO conflict_resolutions VALUES(?,?,?,?,?,?,?,?)',
+                                (proposal_id, actor, 'rollback', manifest['base_hash'], expected_hash,
+                                 None, reason, now()))
+                self.db.execute('INSERT INTO resolutions VALUES(?,?,?,?,?)',
+                                (proposal_id, actor, now(), 'rollback', reason))
+            return dict(proposal_id=proposal_id, outcome='rollback', base_hash=manifest['base_hash'],
+                        rolled_back_from=expected_hash, receipt=result.get('receipt'), time=now())
+
+    def _ensure_conflict_discussion(self, row, conflict):
+        """Open one durable file discussion for an observed v1→v2 conflict.
+
+        Conflict detection is read-driven (status/detail/contribution), so the
+        topic must be idempotent.  The stable discussion ID prevents repeated
+        reads from creating another local topic or Slack thread.
+        """
+        if row['state'] not in ('pending', 'approved'):
+            return
+        discussion_id = f'conflict-{row["id"]}'
+        existing = self.db.execute(
+            'SELECT discussion_id FROM discussion_topics WHERE discussion_id=?',
+            (discussion_id,)).fetchone()
+        if existing is not None:
+            return
+        current_id = conflict.get('current_contribution_id') or 'external edit'
+        body = (f'Concurrent edit detected for proposal `{row["id"]}` on `{row["target"]}`.\n'
+                f'Base v1: `{conflict["base_hash"]}`\n'
+                f'Current v2: `{conflict["current_hash"]}` ({current_id})\n'
+                'Resolve with keep_current, use_incoming, or merge; never overwrite v2 silently.')
+        self.create_topic('wiki', row['target'], 'conflict', f'conflict-{row["id"]}',
+                          'worker', body, proposal_id=row['id'],
+                          discussion_id=discussion_id)
+
+    def close_topic(self, discussion_id, actor, outcome, reason, reviewer=None):
+        """Explicitly close a Slack/file discussion and notify the reviewer once.
+
+        Silence is never treated as completion.  A participant or automation
+        must send an explicit close action; the reviewer then decides in the
+        normal review workflow.
+        """
+        if outcome not in ('resolved', 'rejected', 'on_hold'):
+            raise Invalid('invalid discussion outcome')
+        actor = self._discussion_actor(actor); reason = self._discussion_text(reason, 'discussion close reason')
+        with self.lock():
+            topic = self.db.execute('SELECT * FROM discussion_topics WHERE discussion_id=?', (discussion_id,)).fetchone()
+            if topic is None:
+                raise Invalid('unknown discussion')
+            if topic['status'] in ('resolved', 'decision'):
+                raise Invalid('discussion is already closed')
+            with self.db:
+                self.db.execute('UPDATE discussion_topics SET status=?,updated_at=? WHERE discussion_id=?',
+                                ('resolved' if outcome == 'resolved' else ('blocked' if outcome == 'on_hold' else 'decision'), now(), discussion_id))
+            if self.slack is not None and topic['slack_thread_ts']:
+                thread = {'channel': topic['slack_channel'], 'thread_ts': topic['slack_thread_ts']}
+                self.slack.close_topic(thread, discussion_id, outcome, reason, reviewer)
+                if not topic['reviewer_notified'] and outcome == 'resolved':
+                    self.slack.notify_reviewer(thread, discussion_id, reviewer)
+                    with self.db:
+                        self.db.execute('UPDATE discussion_topics SET reviewer_notified=? WHERE discussion_id=?', (now(), discussion_id))
+            return self.discussion_topics(topic_id=topic['topic_id'])[0]
+
+    def handle_slack_event(self, event, reviewer=None):
+        """Project a Slack thread reply and honor an explicit `close` command."""
+        if not isinstance(event, dict):
+            raise Invalid('invalid Slack event')
+        message = event.get('message', event)
+        channel, thread_ts = message.get('channel'), message.get('thread_ts')
+        if not channel or not thread_ts:
+            return {'ignored': True}
+        topic = self.db.execute('SELECT * FROM discussion_topics WHERE slack_channel=? AND slack_thread_ts=?',
+                                (channel, thread_ts)).fetchone()
+        if topic is None:
+            return {'ignored': True}
+        text = (message.get('text') or '').strip()
+        actor = message.get('user') or message.get('username') or 'slack-user'
+        source_ref = message.get('ts') or message.get('event_ts')
+        if text.lower().startswith('close') or ' close ' in f' {text.lower()} ':
+            reason = text.split(None, 1)[1] if len(text.split(None, 1)) == 2 else 'Closed from Slack'
+            return self.close_topic(topic['discussion_id'], actor, 'resolved', reason, reviewer)
+        self.add_discussion_comment(topic['discussion_id'], actor, text, topic['topic_id'],
+                                    topic['section_anchor'], topic['proposal_id'],
+                                    source_ref=source_ref, mirror=False)
+        return {'discussion_id': topic['discussion_id'], 'received': True}
+
+    def add_discussion_comment(self, discussion_id, author, body, topic_id=None,
+                               section_anchor=None, proposal_id=None, parent_comment_id=None,
+                               status='open', source_ref=None, mirror=True):
+        """Append a canonical comment with explicit topic, anchor and reply relation."""
+        for value, label in ((discussion_id, 'discussion_id'), (author, 'author'), (body, 'body'),
+                             (topic_id, 'topic_id'), (section_anchor, 'section_anchor')):
+            if not isinstance(value, str) or not value.strip():
+                raise Invalid(label + ' required')
+        if status not in ('open', 'resolved', 'blocked', 'decision'):
+            raise Invalid('invalid comment status')
+        comment_id = digest((discussion_id + author + body + now()).encode())[:24]
+        stamp = now()
+        if source_ref and self.db.execute('SELECT 1 FROM discussion_comments WHERE discussion_id=? AND source_ref=?',
+                                          (discussion_id, source_ref)).fetchone():
+            return None
+        with self.db:
+            self.db.execute('''INSERT INTO discussion_comments VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
+                            (discussion_id, comment_id, parent_comment_id, topic_id, section_anchor,
+                             proposal_id, author, body, status, stamp, stamp, source_ref))
+            self.db.execute('UPDATE discussion_topics SET updated_at=? WHERE discussion_id=?',
+                            (stamp, discussion_id))
+        topic = self.db.execute('SELECT slack_channel,slack_thread_ts FROM discussion_topics WHERE discussion_id=?', (discussion_id,)).fetchone()
+        if mirror and self.slack is not None and topic is not None and topic['slack_thread_ts']:
+            self.slack.post({'channel': topic['slack_channel'], 'thread_ts': topic['slack_thread_ts']}, body)
+        return comment_id
+
     def get_discussion(self, ident):
         """Read one proposal discussion and its complete append-only history."""
         with self.lock():
             row = self.row(ident)
             self.integrity(row)
+            return self._workflow_discussion(row)
+
+    def sync_slack_discussion(self, ident):
+        """Collect new replies from the Slack thread into the workflow view.
+
+        Slack remains the source of discussion text; the local rows are only a
+        projection used to bind review/version checks to the frozen proposal.
+        """
+        if self.slack is None:
+            raise Invalid('Slack discussion transport is not configured')
+        with self.lock():
+            row = self.row(ident)
+            discussion = self.db.execute('SELECT * FROM discussions WHERE proposal_id=?', (ident,)).fetchone()
+            if discussion is None or not discussion['slack_thread_ts']:
+                raise Invalid('discussion does not have a Slack thread')
+            thread = {'channel': discussion['slack_channel'], 'thread_ts': discussion['slack_thread_ts']}
+            messages = self.slack.messages(thread)
+            existing = self.db.execute('SELECT COUNT(*) FROM discussion_events WHERE proposal_id=?', (ident,)).fetchone()[0]
+            for message in messages[existing:]:
+                text = message.get('text', '').strip()
+                if not text:
+                    continue
+                with self.db:
+                    sequence = self.db.execute('SELECT COALESCE(MAX(sequence), 0)+1 FROM discussion_events WHERE proposal_id=?', (ident,)).fetchone()[0]
+                    self.db.execute('INSERT INTO discussion_events VALUES(?,?,?,?,?,?,?,?,?)',
+                                    (ident, sequence, message.get('user', 'slack-user'), message.get('ts', now()),
+                                     'message', text, None, None, row['bundle_hash']))
+                    self.db.execute('UPDATE discussions SET version=? WHERE proposal_id=?', (sequence, ident))
+            return self._workflow_discussion(row)
+
+    def sync_discord_discussion(self, ident):
+        """Import Discord thread replies into the canonical local store."""
+        if self.slack is None:
+            raise Invalid('Discord discussion transport is not configured')
+        with self.lock():
+            row = self.row(ident)
+            discussion = self.db.execute('SELECT * FROM discussions WHERE proposal_id=?', (ident,)).fetchone()
+            if discussion is None or not discussion['discord_thread_id']:
+                raise Invalid('discussion does not have a Discord thread')
+            messages = self.slack.messages({'channel': discussion['discord_channel'],
+                                            'thread_id': discussion['discord_thread_id']})
+            existing = self.db.execute('SELECT COUNT(*) FROM discussion_events WHERE proposal_id=?', (ident,)).fetchone()[0]
+            for message in reversed(messages):
+                text = message.get('content', '').strip()
+                if not text or existing and message.get('id') == discussion['discord_thread_id']:
+                    continue
+                actor = (message.get('author') or {}).get('username', 'discord-user')
+                self.add_discussion_comment(ident, actor, text, ident, 'proposal', ident,
+                                            parent_comment_id=None, source_ref=message.get('id'))
+                with self.db:
+                    sequence = self.db.execute('SELECT COALESCE(MAX(sequence), 0)+1 FROM discussion_events WHERE proposal_id=?', (ident,)).fetchone()[0]
+                    self.db.execute('INSERT INTO discussion_events VALUES(?,?,?,?,?,?,?,?,?)',
+                                    (ident, sequence, actor, message.get('timestamp', now()), 'message', text, None, None, row['bundle_hash']))
+                    self.db.execute('UPDATE discussions SET version=? WHERE proposal_id=?', (sequence, ident))
             return self._workflow_discussion(row)
 
     def _current_discussion(self, ident, bundle_hash, version):
@@ -492,13 +790,31 @@ class Worker:
                 raise Invalid('discussion requires the current pending contribution')
             if self._workflow_discussion(row)['discussion'] is not None:
                 raise Invalid('discussion already exists; add a message or place it on hold')
+            thread = None
+            if self.slack is not None:
+                thread = self.slack.open(row['id'], row['bundle_hash'], reason)
             try:
                 with self.db:
-                    self.db.execute('INSERT INTO discussions VALUES(?,?,?,?,?,?)',
+                    self.db.execute('INSERT INTO discussions(proposal_id,bundle_hash,status,version,created_by,created_at) VALUES(?,?,?,?,?,?)',
                                     (row['id'], row['bundle_hash'], 'open', 1, actor, now()))
+                    if thread:
+                        if 'thread_ts' in thread:
+                            self.db.execute('UPDATE discussions SET slack_channel=?, slack_thread_ts=? WHERE proposal_id=?',
+                                            (thread['channel'], thread['thread_ts'], row['id']))
+                        else:
+                            self.db.execute('UPDATE discussions SET discord_channel=?, discord_thread_id=? WHERE proposal_id=?',
+                                            (thread['channel'], thread['thread_id'], row['id']))
                     self.db.execute('INSERT INTO discussion_events VALUES(?,?,?,?,?,?,?,?,?)',
                                     (row['id'], 1, actor, now(), 'open', reason, None, None,
                                      row['bundle_hash']))
+                    stamp = now()
+                    self.db.execute('''INSERT INTO discussion_topics
+                        (discussion_id,project_id,document_path,section_anchor,topic_id,parent_topic_id,proposal_id,author,body,status,created_at,updated_at,source_refs,slack_channel,slack_thread_ts,reviewer_notified)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (row['id'], None, row['target'], 'proposal', row['id'], None, row['id'],
+                         actor, reason, 'open', stamp, stamp, '[]',
+                         thread['channel'] if thread and 'channel' in thread else None,
+                         thread['thread_ts'] if thread and 'thread_ts' in thread else None, None))
             except sqlite3.IntegrityError as exc:
                 raise Conflict('discussion already exists; reread the discussion') from exc
             return self._workflow_discussion(row)
@@ -517,6 +833,12 @@ class Worker:
                 action = 'agreement'
             else:
                 action = 'message'
+            if self.slack is not None:
+                discussion = self.db.execute('SELECT * FROM discussions WHERE proposal_id=?', (ident,)).fetchone()
+                if discussion is not None and discussion['slack_thread_ts']:
+                    self.slack.post({'channel': discussion['slack_channel'], 'thread_ts': discussion['slack_thread_ts']}, message)
+            self.add_discussion_comment(ident, actor, message, ident, 'proposal', ident,
+                                        status='open')
             return self._append_discussion_event(row, current, actor, action, message, agrees_with)
 
     def hold_proposal(self, ident, actor, bundle_hash, version, reason):
@@ -606,6 +928,11 @@ class Worker:
                 raise Invalid('resolution kind is only valid for resolve')
             event = (ident, discussion_version + 1, actor, now(), action, reason,
                      resolution_kind, json.dumps(related), row['bundle_hash'])
+            if self.slack is not None:
+                workflow = self.db.execute('SELECT slack_channel,slack_thread_ts FROM discussions WHERE proposal_id=?', (ident,)).fetchone()
+                if workflow is not None and workflow['slack_thread_ts']:
+                    self.slack.post({'channel': workflow['slack_channel'], 'thread_ts': workflow['slack_thread_ts']},
+                                    f'[{action}] {actor}: {reason}')
             try:
                 with self.db:
                     self.db.execute('INSERT INTO semantic_discussions VALUES(?,?,?,?,?,?,?,?,?)', event)
@@ -687,6 +1014,10 @@ class Worker:
             current = self.remote.read(row['target'])
             base_hash = parse(row['manifest'])['base_hash']
             if (None if current is None else digest(current['content'])) != base_hash:
+                # A publish-time race is evidence for the reviewer.  Never
+                # open a discussion (or contact Slack) from the worker's
+                # read/write path.
+                self.conflict(row)
                 with self.db:
                     self.db.execute("UPDATE proposals SET state='stale' WHERE id=?", (ident,))
                 return 'stale'
@@ -749,7 +1080,95 @@ class Worker:
             workflow_discussion = self._workflow_discussion(row)
             item['discussion_hold'] = workflow_discussion['discussion_hold']
             item['disputed'] = bool(item['disputed']) or item['discussion_hold']
+            item['conflict'] = self.conflict(row)
         return result
+
+    def conflict(self, row):
+        """Describe a head conflict without changing the published wiki.
+
+        A contribution is always compared with the exact v1 bytes it read.  If
+        another contribution has produced v2 meanwhile, v1 remains the merge
+        base; we never destructively roll the wiki back just to display it.
+        """
+        if row['base'] is None:
+            return None
+        current = self.remote.read(row['target'])
+        if current is None or digest(current['content']) == parse(row['manifest'])['base_hash']:
+            return None
+        published = None
+        for item in self.db.execute(
+                "SELECT id,artifact,artifact_hash FROM proposals WHERE target=? AND state='published' ORDER BY rowid DESC",
+                (row['target'],)):
+            if item['artifact_hash'] and digest(item['artifact']) == digest(current['content']):
+                published = item['id']; break
+        base_content = row['base'].decode()
+        current_content = current['content'].decode()
+        proposal_content = row['proposed'].decode()
+        result = dict(status='concurrent-change', stale=True, proposal_id=row['id'], target=row['target'],
+                    base_hash=parse(row['manifest'])['base_hash'], base_content=row['base'].decode(),
+                    current_hash=digest(current['content']), current_content=current_content,
+                    proposal_hash=digest(row['proposed']), proposal_content=proposal_content,
+                    current_version=current.get('version'), current_contribution_id=published)
+        result['diff'] = ''.join(difflib.unified_diff(base_content.splitlines(True), current_content.splitlines(True), fromfile='v1', tofile='v2'))
+        result['proposal_diff'] = ''.join(difflib.unified_diff(base_content.splitlines(True), proposal_content.splitlines(True), fromfile='v1', tofile='proposal'))
+        result['hunks'] = [dict(opcodes=[dict(tag=tag, base_start=i1, base_end=i2,
+                                              current_start=j1, current_end=j2)
+                                         for tag, i1, i2, j1, j2 in group])
+                           for group in difflib.SequenceMatcher(
+                               None, base_content.splitlines(True), current_content.splitlines(True)
+                           ).get_grouped_opcodes(3)]
+        return result
+
+    def resolve_conflict(self, ident, actor, outcome, reason, merged_content=None):
+        """Resolve a v1→v2 race by rejecting B or creating a fresh v2-based proposal."""
+        with self.lock():
+            row = self.row(ident); self.integrity(row); self.check_reviewer(row, actor)
+            if outcome not in ('keep_current', 'use_incoming', 'merge'):
+                raise Invalid('invalid conflict outcome')
+            if not isinstance(reason, str) or not reason.strip():
+                raise Invalid('conflict resolution reason required')
+            conflict = self.conflict(row)
+            if conflict is None:
+                raise Invalid('contribution has no current conflict')
+            if outcome == 'keep_current':
+                with self.db:
+                    self.db.execute("UPDATE proposals SET state='rejected', decision=? WHERE id=?",
+                                    (json.dumps(dict(actor=actor, time=now(), reason=reason,
+                                                     approved=False, conflict_outcome=outcome)), ident))
+                replacement = None
+            else:
+                proposed = row['proposed'] if outcome == 'use_incoming' else (
+                    merged_content.encode() if isinstance(merged_content, str) else None)
+                if not proposed:
+                    raise Invalid('merged content required')
+                new_id = f"{ident}-merge-{now().replace('-', '').replace(':', '').replace('T', '')[:12]}"
+                new_id = re.sub(r'[^A-Za-z0-9_-]', '', new_id)[:80]
+                manifest = dict(schema_version=1, id=new_id, target=row['target'],
+                                base_hash=conflict['current_hash'], proposed_hash=digest(proposed),
+                                reason=reason, sources=parse(row['manifest']).get('sources', []))
+                raw_manifest = json.dumps(manifest).encode()
+                validate_bundle(raw_manifest, conflict['current_content'].encode(), proposed)
+                try:
+                    with self.db:
+                        self.db.execute('''INSERT INTO proposals
+                          (id,target,bundle_hash,manifest,base,proposed,submitter,state)
+                          VALUES(?,?,?,?,?,?,?,'pending')''',
+                          (new_id, row['target'], digest(raw_manifest), raw_manifest,
+                           conflict['current_content'].encode(), proposed, row['submitter']))
+                except sqlite3.IntegrityError as exc:
+                    raise Conflict('replacement contribution ID already exists; retry') from exc
+                replacement = new_id
+                with self.db:
+                    self.db.execute("UPDATE proposals SET state='rejected', decision=? WHERE id=?",
+                                    (json.dumps(dict(actor=actor, time=now(), reason=reason,
+                                                     approved=False, conflict_outcome=outcome,
+                                                     replacement_id=replacement)), ident))
+            with self.db:
+                self.db.execute('INSERT OR REPLACE INTO conflict_resolutions VALUES(?,?,?,?,?,?,?,?)',
+                                (ident, actor, outcome, conflict['base_hash'], conflict['current_hash'],
+                                 replacement, reason, now()))
+            return dict(proposal_id=ident, outcome=outcome, replacement_id=replacement,
+                        base_hash=conflict['base_hash'], current_hash=conflict['current_hash'])
 
     def detail(self, ident):
         """Return JSON-ready proposal data for trusted review interfaces."""
@@ -767,7 +1186,8 @@ class Worker:
                         context_status=proposal_context.freshness(self, manifest.get('context'),
                                                                   include_target=row['state'] != 'published'),
                         base=(row['base'] or b'').decode(), proposed=row['proposed'].decode(),
-                        decision=parse(row['decision']) if row['decision'] else None)
+                        decision=parse(row['decision']) if row['decision'] else None,
+                        conflict=self.conflict(row))
 
     def contribution(self, ident):
         """One consistent read supplies both review context and the exact artifact."""
@@ -796,7 +1216,8 @@ class Worker:
                         diff='' if artifact is None else ''.join(difflib.unified_diff(
                             (row['base'] or b'').decode().splitlines(True), artifact.decode().splitlines(True),
                             fromfile='base.md', tofile='artifact.md')),
-                        decision=parse(row['decision']) if row['decision'] else None)
+                        decision=parse(row['decision']) if row['decision'] else None,
+                        conflict=self.conflict(row))
 
     def backup(self, destination):
         with self.lock():

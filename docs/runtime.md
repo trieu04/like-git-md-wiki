@@ -160,6 +160,6 @@ See [agent workflow](agent-workflow.md) for the contributor and reviewer skills.
 
 The SQLite backup now also includes `document_versions`, the immutable observed source snapshots, and the append-only semantic discussion log. Version labels use UTC observation dates and per-document daily sequences, not publication or effective dates. Legacy proposals without context are reported as unversioned.
 
-## Semantic-conflict playground
+## Reviewer workflow playground
 
-Run `make playground` and open the printed localhost URL. The disposable demo contains two pending proposals against the same sample policy: one has an open dispute and one has a resolved, scoped discussion. Use the reviewer page to add comments, resolve or reopen the hold, reject a revision request, approve an eligible proposal and publish it. The temporary wiki and SQLite state are removed when the server exits; this command never writes `wiki-en`.
+Run `make playground` and open the printed localhost URL. The disposable demo contains an A/B/C concurrent-contribution case and an explicit semantic contradiction (`X is blue` versus `X is red`). Use [the reviewer demo runbook](reviewer-demo-runbook.md) to inspect evidence, classify conflicts, record discussion decisions, and keep merge authoring, approval and publication separate. The temporary wiki and SQLite state are removed when the server exits; this command never writes `wiki-en`.

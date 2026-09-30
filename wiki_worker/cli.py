@@ -18,6 +18,12 @@ def main():
     storage.add_argument('--fixture', help='SQLite test transport')
     parser.add_argument('--reviewer', required=True, help='reviewer ID in the trusted local execution environment')
     parser.add_argument('--owner', default='Pilot owner')
+    parser.add_argument('--slack-token', help='Slack bot token (discussion transport)')
+    parser.add_argument('--slack-channel', help='Slack channel ID for discussion threads')
+    parser.add_argument('--slack-signing-secret', help='Slack Events API signing secret')
+    parser.add_argument('--slack-reviewer', help='Slack user ID to mention when a discussion is explicitly closed')
+    parser.add_argument('--discord-token', help='Optional Discord bot token')
+    parser.add_argument('--discord-channel', help='Optional Discord channel ID')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('list', help='list Markdown documents')
     show = sub.add_parser('show', help='read a Markdown document')
@@ -53,6 +59,8 @@ def main():
     publish = sub.add_parser('publish')
     publish.add_argument('id')
     sub.add_parser('status')
+    sync = sub.add_parser('slack-sync', aliases=['discord-sync'], help='collect replies into the canonical discussion store')
+    sync.add_argument('id')
     resolve = sub.add_parser('resolve')
     resolve.add_argument('id')
     resolve.add_argument('--actor', required=True)
@@ -73,7 +81,18 @@ def main():
         if args.command.startswith('fixture-') and not args.fixture:
             raise Invalid('fixture commands require --fixture')
         remote = LocalFolderStorage(args.folder) if args.folder else FixtureRemote(args.fixture)
-        worker = Worker(args.state, remote, args.reviewer, args.owner)
+        transport = None
+        if args.slack_token or args.slack_channel:
+            if not args.slack_token or not args.slack_channel:
+                raise Invalid('--slack-token and --slack-channel must be used together')
+            from .slack import SlackDiscussion
+            transport = SlackDiscussion(args.slack_token, args.slack_channel)
+        elif args.discord_token or args.discord_channel:
+            if not args.discord_token or not args.discord_channel:
+                raise Invalid('--discord-token and --discord-channel must be used together')
+            from .discord import DiscordDiscussion
+            transport = DiscordDiscussion(args.discord_token, args.discord_channel)
+        worker = Worker(args.state, remote, args.reviewer, args.owner, slack=transport)
         if args.command == 'list':
             print(json.dumps(remote.list_markdown(), indent=2, ensure_ascii=False))
         elif args.command == 'show':
@@ -125,6 +144,9 @@ def main():
             print(worker.publish(args.id))
         elif args.command == 'status':
             print(json.dumps(worker.status(), indent=2))
+        elif args.command in ('discord-sync', 'slack-sync'):
+            method = worker.sync_discord_discussion if args.command == 'discord-sync' else worker.sync_slack_discussion
+            print(json.dumps(method(args.id), ensure_ascii=False))
         elif args.command == 'resolve':
             worker.resolve(args.id, args.actor, args.outcome, args.evidence, args.receipt)
             print('Resolution saved.')
@@ -141,7 +163,8 @@ def main():
         elif args.command == 'web':
             worker.db.close()
             serve(args.host, args.port, args.state, args.folder, args.fixture,
-                  args.reviewer, args.owner)
+                  args.reviewer, args.owner, transport, args.slack_signing_secret,
+                  args.slack_reviewer)
     except (Invalid, Conflict, OSError, EOFError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None

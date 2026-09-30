@@ -10,17 +10,19 @@ from .core import Worker
 from .fixture import FixtureRemote
 from .local import LocalFolderStorage
 from .skill import describe, skill_file
+from .slack import SlackError
 
 
 class Application:
-    def __init__(self, state, folder, fixture, reviewer, owner):
+    def __init__(self, state, folder, fixture, reviewer, owner, slack=None, slack_signing_secret=None, slack_reviewer=None):
         self.state, self.folder, self.fixture = state, folder, fixture
-        self.reviewer, self.owner = reviewer, owner
+        self.reviewer, self.owner, self.slack = reviewer, owner, slack
+        self.slack_signing_secret, self.slack_reviewer = slack_signing_secret, slack_reviewer
         self.index = files('wiki_worker').joinpath('static/index.html').read_bytes()
 
     def worker(self):
         storage = LocalFolderStorage(self.folder) if self.folder else FixtureRemote(self.fixture)
-        return Worker(self.state, storage, self.reviewer, self.owner)
+        return Worker(self.state, storage, self.reviewer, self.owner, slack=self.slack)
 
     def close(self, worker):
         worker.db.close()
@@ -95,6 +97,17 @@ class Handler(BaseHTTPRequestHandler):
                     storage='local folder' if self.server.application.folder else 'fixture'))
             if route == '/api/contribution':
                 return self.json(HTTPStatus.OK, worker.status())
+            if route == '/api/discussions':
+                query = parse_qs(urlsplit(self.path).query)
+                return self.json(HTTPStatus.OK, worker.discussion_topics(
+                    query.get('project_id', [None])[0], query.get('document_path', [None])[0],
+                    query.get('section_anchor', [None])[0], query.get('topic_id', [None])[0]))
+            if len(parts := route.strip('/').split('/')) == 3 and parts[:2] == ['api', 'discussions']:
+                topics = worker.discussion_topics()
+                match = [item for item in topics if item['discussion_id'] == unquote(parts[2])]
+                if not match:
+                    return self.json(HTTPStatus.NOT_FOUND, {'error': 'discussion not found'})
+                return self.json(HTTPStatus.OK, match[0])
             if route == '/api/wiki':
                 return self.json(HTTPStatus.OK, worker.remote.list_markdown())
             if route in ('/api/wiki/versions', '/api/wiki/version'):
@@ -117,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[:2] == ['api', 'discussion']:
                 return self.json(HTTPStatus.OK, worker.get_discussion(unquote(parts[2])))
             self.json(HTTPStatus.NOT_FOUND, {'error': 'route not found'})
-        except (Invalid, Conflict, UnicodeError) as exc:
+        except (Invalid, Conflict, SlackError, UnicodeError, ValueError) as exc:
             self.json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
         finally:
             if worker is not None:
@@ -128,15 +141,56 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = urlsplit(self.path).path
             parts = route.strip('/').split('/')
-            discussion_route = (route == '/api/discussion' or
+            if route == '/api/slack/events':
+                raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                slack = self.server.application.slack
+                secret = self.server.application.slack_signing_secret
+                if slack is None or not secret or not slack.verify_signature(secret,
+                        self.headers.get('X-Slack-Request-Timestamp'), raw,
+                        self.headers.get('X-Slack-Signature')):
+                    return self.json(HTTPStatus.UNAUTHORIZED, {'error': 'invalid Slack signature'})
+                data = json.loads(raw)
+                if data.get('type') == 'url_verification':
+                    return self.json(HTTPStatus.OK, {'challenge': data.get('challenge')})
+                worker = self.server.application.worker()
+                result = worker.handle_slack_event(data.get('event', data), self.server.application.slack_reviewer)
+                return self.json(HTTPStatus.OK, result)
+            discussion_route = (route in ('/api/discussion', '/api/discussions') or
                 (len(parts) == 4 and parts[:2] == ['api', 'discussion'] and
-                 parts[3] in ('messages', 'resolve', 'hold')))
+                 parts[3] in ('messages', 'resolve', 'hold', 'sync')) or
+                (len(parts) == 4 and parts[:2] == ['api', 'discussions'] and parts[3] in ('comments', 'close')) or
+                route == '/api/slack/events')
             if (route != '/api/contribution/import' and not discussion_route and not
                     (len(parts) == 4 and parts[:2] == ['api', 'contribution'] and
-                     parts[3] in ('review', 'publish', 'discussion'))):
+                     parts[3] in ('review', 'publish', 'discussion', 'conflict', 'concurrent-discussion', 'rollback'))):
                 return self.json(HTTPStatus.NOT_FOUND, {'error': 'route not found'})
             data = self.body()
             worker = self.server.application.worker()
+            if len(parts) == 4 and parts[:2] == ['api', 'discussions'] and parts[3] == 'comments':
+                required = ('author', 'body', 'topic_id', 'section_anchor')
+                if any(not isinstance(data.get(k), str) for k in required):
+                    raise Invalid('incomplete discussion comment')
+                comment_id = worker.add_discussion_comment(
+                    unquote(parts[2]), data['author'], data['body'], data['topic_id'],
+                    data['section_anchor'], data.get('proposal_id'), data.get('parent_comment_id'),
+                    data.get('status', 'open'), data.get('source_ref'))
+                return self.json(HTTPStatus.CREATED, {'comment_id': comment_id})
+            if len(parts) == 4 and parts[:2] == ['api', 'discussions'] and parts[3] == 'close':
+                required = ('actor', 'outcome', 'reason')
+                if any(not isinstance(data.get(k), str) for k in required):
+                    raise Invalid('incomplete discussion close')
+                return self.json(HTTPStatus.OK, worker.close_topic(
+                    unquote(parts[2]), data['actor'], data['outcome'], data['reason'],
+                    data.get('reviewer')))
+            if route == '/api/discussions':
+                required = ('project_id', 'document_path', 'section_anchor', 'topic_id', 'author', 'body')
+                if any(not isinstance(data.get(k), str) for k in required):
+                    raise Invalid('incomplete topic discussion')
+                ident = worker.create_topic(data['project_id'], data['document_path'], data['section_anchor'],
+                                            data['topic_id'], data['author'], data['body'],
+                                            data.get('parent_topic_id'), data.get('proposal_id'),
+                                            data.get('source_refs'), data.get('status', 'open'), data.get('discussion_id'))
+                return self.json(HTTPStatus.CREATED, {'discussion_id': ident})
             if route == '/api/contribution/import':
                 if not isinstance(data.get('file'), str) or not isinstance(data.get('submitter'), str) or not data['submitter'].strip():
                     raise Invalid('contribution file and verified submitter required')
@@ -151,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(HTTPStatus.CREATED, result)
             if len(parts) == 4 and parts[:2] == ['api', 'discussion']:
                 ident = unquote(parts[2])
+                if parts[3] == 'sync':
+                    sync = worker.sync_discord_discussion if worker.slack.__class__.__name__ == 'DiscordDiscussion' else worker.sync_slack_discussion
+                    return self.json(HTTPStatus.OK, sync(ident))
                 required = ('actor', 'bundle_hash', 'discussion_version')
                 if (any(key not in data for key in required) or
                         not isinstance(data.get('actor'), str) or not isinstance(data.get('bundle_hash'), str) or
@@ -183,6 +240,27 @@ class Handler(BaseHTTPRequestHandler):
                     data['action'], data['reason'], data.get('resolution_kind'),
                     data.get('related_contribution_ids'))
                 return self.json(HTTPStatus.OK, result)
+            if parts[3] == 'conflict':
+                required = ('actor', 'outcome', 'reason')
+                if any(not isinstance(data.get(key), str) for key in required):
+                    raise Invalid('incomplete conflict resolution')
+                result = worker.resolve_conflict(unquote(parts[2]), data['actor'], data['outcome'],
+                                                 data['reason'], data.get('merged_content'))
+                return self.json(HTTPStatus.OK, result)
+            if parts[3] == 'concurrent-discussion':
+                if not all(isinstance(data.get(key), str) and data[key].strip()
+                           for key in ('actor', 'section_anchor', 'reason')):
+                    raise Invalid('incomplete concurrent discussion request')
+                result = worker.open_concurrent_discussion(
+                    unquote(parts[2]), data['actor'], data['section_anchor'],
+                    data['reason'], data.get('related_proposal_ids'), data.get('project_id', 'wiki'))
+                return self.json(HTTPStatus.CREATED, result)
+            if parts[3] == 'rollback':
+                if not all(isinstance(data.get(key), str) and data[key].strip()
+                           for key in ('actor', 'reason')):
+                    raise Invalid('incomplete rollback request')
+                return self.json(HTTPStatus.OK, worker.rollback_to_base(
+                    unquote(parts[2]), data['actor'], data['reason'], data.get('expected_v2_hash')))
             if parts[3] == 'review':
                 keys = ('bundle_hash', 'time', 'artifact', 'actor', 'reason')
                 if any(not isinstance(data.get(k), str) for k in keys) or not isinstance(data.get('approve'), bool):
@@ -194,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                 worker.review(ident, data['actor'], preview, data['approve'], data['reason'])
                 return self.json(HTTPStatus.OK, {'state': 'approved' if data['approve'] else 'rejected'})
             return self.json(HTTPStatus.OK, {'state': worker.publish(ident)})
-        except (Invalid, Conflict, UnicodeError) as exc:
+        except (Invalid, Conflict, SlackError, UnicodeError) as exc:
             self.json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
         finally:
             if worker is not None:
@@ -204,11 +282,13 @@ class Handler(BaseHTTPRequestHandler):
         print('%s - %s' % (self.address_string(), pattern % args))
 
 
-def serve(host, port, state, folder, fixture, reviewer, owner):
+def serve(host, port, state, folder, fixture, reviewer, owner, slack=None,
+          slack_signing_secret=None, slack_reviewer=None):
     if host not in ('127.0.0.1', '::1', 'localhost'):
         raise Invalid('web UI currently binds to localhost only; authentication is not implemented')
     server = ThreadingHTTPServer((host, port), Handler)
-    server.application = Application(state, folder, fixture, reviewer, owner)
+    server.application = Application(state, folder, fixture, reviewer, owner, slack,
+                                     slack_signing_secret, slack_reviewer)
     print(f'Wiki UI: http://{host}:{server.server_port}')
     try:
         server.serve_forever()
