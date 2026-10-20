@@ -9,7 +9,7 @@ function wikiApp() {
     workflowAgreesWith: '', workflowDecision: 'on_hold', workflowDecisionReason: '',
     conflictOutcome: 'keep_current', conflictReason: '', mergedContent: '',
     importText: '', importAuthor: '', wikiPaths: [], documentContent: '', selectedPath: '', selectedReference: null,
-    discussions: [], discussionForm: {project_id:'wiki', document_path:'', section_anchor:'file', topic_id:'', author:'', body:''},
+    discussions: [], discussionForm: {project_id:'wiki', document_path:'', section_anchor:'file', topic_id:'', author:'', body:'', decision_owners:''},
     collapsedFolders: [],
     async init() {
       try { this.config = await this.request('/api/config'); await this.refresh(); }
@@ -70,7 +70,11 @@ function wikiApp() {
     },
     async createTopic() {
       this.busy = true; this.clear();
-      try { await this.request('/api/discussions', {method:'POST', body:JSON.stringify(this.discussionForm)}); await this.openDiscussions(); this.notice='Discussion opened.'; }
+      try {
+        const owners = this.discussionForm.decision_owners.split(',').map(value => value.trim()).filter(Boolean);
+        const payload = {...this.discussionForm, decision_owners: owners.length ? owners : undefined};
+        await this.request('/api/discussions', {method:'POST', body:JSON.stringify(payload)}); await this.openDiscussions(); this.notice='Discussion opened.';
+      }
       catch (e) { this.fail(e); } finally { this.busy = false; }
     },
     async commentTopic(topic) {
@@ -78,6 +82,15 @@ function wikiApp() {
       this.busy = true; this.clear();
       try { await this.request('/api/discussions/' + encodeURIComponent(topic.discussion_id) + '/comments', {method:'POST', body:JSON.stringify({author:this.discussionForm.author || this.config.reviewer, body:topic.reply, topic_id:topic.topic_id, section_anchor:topic.section_anchor})}); await this.openDiscussions(); }
       catch (e) { this.fail(e); } finally { this.busy = false; }
+    },
+    async closeTopic(topic) {
+      if (!topic.closeReason?.trim()) return;
+      this.busy = true; this.clear();
+      try {
+        await this.request('/api/discussions/' + encodeURIComponent(topic.discussion_id) + '/close', {
+          method:'POST', body:JSON.stringify({actor:this.discussionForm.author || this.config.reviewer, outcome:topic.closeOutcome || 'resolved', reason:topic.closeReason})});
+        await this.openDiscussions(); this.notice='Discussion closed by its decision owner.';
+      } catch (e) { this.fail(e); } finally { this.busy = false; }
     },
     async openSkill(role) {
       this.clear(); this.skillRole = role; this.skillContent = '';

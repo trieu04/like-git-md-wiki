@@ -7,6 +7,8 @@ __pycache__/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+.env
+/wiki-demo-stroke/
 
 # Local wiki content and source evidence
 /wiki/

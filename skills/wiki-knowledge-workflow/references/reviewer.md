@@ -7,7 +7,7 @@ The reviewer works on contributions received as files/bundles. To ingest a bundl
 | Tool | Input | Output |
 | --- | --- | --- |
 | `GET /api/contribution` | none | Queue with IDs, authors and states |
-| `GET /api/contribution/ID` | contribution ID | Base/body, reason, knowledge change, source snapshots/status, exact artifact, diff, bundle/artifact hashes, time, previous decision and `can_review` |
+| `GET /api/contribution/ID` | contribution ID | Base/body, reason, knowledge change, source snapshots/status, exact artifact, diff, bundle/artifact hashes, time, previous decision, forwarded `reviewer_decision_requests`, and `can_review` |
 | `GET /api/wiki/versions?path=PATH` | URL-encoded Markdown path | Observed version references and tracked contributions with decisions, proposed diffs and publication receipts |
 | `GET /api/wiki/version?path=PATH&version=VERSION` | Exact version from history | Immutable content, hash and capture time |
 | `POST /api/contribution/import` | `file` (file text), `submitter` (verified author) | Imported ID, pending |
@@ -24,6 +24,14 @@ When assigned review, inspect pending contributions and assess source support, c
 If context is `stale`, inspect old snapshots and obtain current context using the CLI, then reject or request revision; do not approve. If it is `unversioned`, request versioned context when needed. If evidence is insufficient, leave pending and report what is missing, or explicitly reject with reasons. `current` alone does not justify approval.
 
 Send the exact artifact/time/hash and `discussion_version` from the contribution response with your decision; do not recreate these fields. Approval is blocked while `disputed` is true, while rejection remains available for a concrete revision request. Follow [semantic-conflicts.md](semantic-conflicts.md) to record the claims, evidence and outcome. The configured reviewer identity may be an agent distinct from the author. An assigned publication step calls publish separately; the worker checks freshness again. Reading/importing a contribution never automatically approves it.
+
+When an agent reviewer asks for human judgment in a Slack discussion, a human
+may mention the bot with `approve <reason>` or `reject <reason>`. Re-read the
+contribution and inspect `reviewer_decision_requests`; preserve the recorded
+Slack actor and reason in the reviewer rationale. This is explicit human input,
+not an applied review decision. The configured reviewer must still perform the
+normal review action against the current artifact and discussion versions, and
+must not publish unless publication was separately assigned.
 
 The API runs on localhost with caller-declared identities in a trusted environment; production authentication is not implemented.
 

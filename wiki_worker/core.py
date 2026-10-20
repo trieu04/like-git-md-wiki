@@ -225,13 +225,21 @@ class Worker:
             discussion_id TEXT PRIMARY KEY, project_id TEXT, document_path TEXT NOT NULL,
             section_anchor TEXT NOT NULL, topic_id TEXT NOT NULL, parent_topic_id TEXT,
             proposal_id TEXT, author TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_refs TEXT NOT NULL);
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_refs TEXT NOT NULL,
+            resolve_assignees TEXT NOT NULL DEFAULT '[]', decision_owner TEXT,
+            decision_owners TEXT NOT NULL DEFAULT '[]');
           CREATE TABLE IF NOT EXISTS discussion_comments(
             discussion_id TEXT NOT NULL, comment_id TEXT NOT NULL, parent_comment_id TEXT,
             topic_id TEXT NOT NULL, section_anchor TEXT NOT NULL, proposal_id TEXT,
             author TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_ref TEXT,
             PRIMARY KEY(discussion_id, comment_id));
+          CREATE TABLE IF NOT EXISTS reviewer_decision_requests(
+            request_id TEXT PRIMARY KEY, discussion_id TEXT NOT NULL,
+            proposal_id TEXT, actor TEXT NOT NULL, decision TEXT NOT NULL,
+            reason TEXT NOT NULL, source_ref TEXT, created_at TEXT NOT NULL,
+            forwarded_at TEXT,
+            UNIQUE(discussion_id, source_ref));
           CREATE TABLE IF NOT EXISTS conflict_resolutions(
             proposal_id TEXT PRIMARY KEY, actor TEXT NOT NULL, outcome TEXT NOT NULL,
             base_hash TEXT NOT NULL, current_hash TEXT NOT NULL, replacement_id TEXT,
@@ -249,6 +257,31 @@ class Worker:
                 self.db.execute(f'ALTER TABLE discussion_topics ADD COLUMN {column} TEXT')
             except sqlite3.OperationalError:
                 pass
+        for definition in ("resolve_assignees TEXT NOT NULL DEFAULT '[]'",
+                           'decision_owner TEXT',
+                           "decision_owners TEXT NOT NULL DEFAULT '[]'"):
+            try:
+                self.db.execute(f'ALTER TABLE discussion_topics ADD COLUMN {definition}')
+            except sqlite3.OperationalError:
+                pass
+        with self.db:
+            for topic in self.db.execute(
+                    '''SELECT discussion_id,author,decision_owner,decision_owners
+                       FROM discussion_topics''').fetchall():
+                owners = json.loads(topic['decision_owners'] or '[]')
+                if owners:
+                    continue
+                owner = topic['decision_owner'] or topic['author']
+                self.db.execute(
+                    '''UPDATE discussion_topics
+                       SET resolve_assignees=CASE WHEN resolve_assignees='[]' THEN ? ELSE resolve_assignees END,
+                           decision_owner=?,decision_owners=? WHERE discussion_id=?''',
+                    (json.dumps([topic['author']]), owner, json.dumps([owner]),
+                     topic['discussion_id']))
+        try:
+            self.db.execute('ALTER TABLE reviewer_decision_requests ADD COLUMN forwarded_at TEXT')
+        except sqlite3.OperationalError:
+            pass
 
     @contextlib.contextmanager
     def lock(self):
@@ -403,6 +436,7 @@ class Worker:
                 (row['base'] or b'').decode().splitlines(True),
                 artifact.decode().splitlines(True), fromfile='base.md', tofile='artifact.md'))
             return dict(bundle_hash=row['bundle_hash'], artifact=artifact, time=stamp,
+                        reviewer_decision_requests=self.reviewer_decision_requests(ident),
                         **self.semantic_discussion(ident),
                         **self._workflow_discussion(row),
                         diff=diff, reason=m['reason'], sources=m.get('sources', []),
@@ -477,33 +511,93 @@ class Worker:
         topics = [dict(r) for r in self.db.execute('SELECT * FROM discussion_topics' + where + ' ORDER BY created_at', args)]
         for topic in topics:
             topic['source_refs'] = json.loads(topic['source_refs'])
+            topic['resolve_assignees'] = json.loads(topic['resolve_assignees'] or '[]')
+            topic['decision_owners'] = json.loads(topic['decision_owners'] or '[]')
             topic['comments'] = [dict(r) for r in self.db.execute(
                 'SELECT * FROM discussion_comments WHERE discussion_id=? ORDER BY created_at', (topic['discussion_id'],))]
         return topics
 
+    def _discussion_file_authors(self, document_path, proposal_id=None, source_refs=None):
+        """Find accountable people from frozen contribution authors for related files."""
+        paths = [document_path]
+        for ref in source_refs or []:
+            path = ref.get('path') if isinstance(ref, dict) else ref
+            if isinstance(path, str) and path not in paths:
+                paths.append(path)
+        if proposal_id:
+            row = self.row(proposal_id)
+            manifest = parse(row['manifest'])
+            for item in manifest.get('scope_impact', []):
+                if item['path'] not in paths:
+                    paths.append(item['path'])
+        authors = []
+        for path in paths:
+            row = self.db.execute(
+                '''SELECT p.submitter FROM proposals p
+                   LEFT JOIN history h ON h.id=p.id
+                   WHERE p.target=?
+                   ORDER BY (h.id IS NOT NULL) DESC, p.rowid DESC LIMIT 1''', (path,)).fetchone()
+            if row is not None and row['submitter'] not in authors:
+                authors.append(row['submitter'])
+        if proposal_id:
+            submitter = self.row(proposal_id)['submitter']
+            if submitter not in authors:
+                authors.append(submitter)
+        return authors
+
+    def reviewer_decision_requests(self, proposal_id):
+        """Return explicit human approve/reject requests visible to the reviewer.
+
+        These requests are advisory input. They never mutate proposal state;
+        the configured reviewer must still use the normal review operation.
+        """
+        return [dict(row) for row in self.db.execute(
+            '''SELECT request_id,discussion_id,proposal_id,actor,decision,reason,
+                      source_ref,created_at,forwarded_at
+               FROM reviewer_decision_requests
+               WHERE proposal_id=? ORDER BY created_at,request_id''',
+            (proposal_id,))]
+
     def create_topic(self, project_id, document_path, section_anchor, topic_id, author,
                      body, parent_topic_id=None, proposal_id=None, source_refs=None,
-                     status='open', discussion_id=None):
+                     status='open', discussion_id=None, decision_owners=None):
         """Create an anchor/topic discussion without requiring a proposal."""
         values = (project_id, document_path, section_anchor, topic_id, author, body)
         if any(not isinstance(v, str) or not v.strip() for v in values):
             raise Invalid('project_id, document_path, section_anchor, topic_id, author and body are required')
         if status not in ('open', 'resolved', 'blocked', 'decision'):
             raise Invalid('invalid topic status')
+        resolve_assignees = self._discussion_file_authors(
+            document_path, proposal_id, source_refs)
+        # Files imported before author tracking have no accountable author. In
+        # that legacy case the person opening the topic owns the resolution.
+        if not resolve_assignees:
+            resolve_assignees = [author.strip()]
+        if decision_owners is None:
+            decision_owners = list(resolve_assignees)
+        if (not isinstance(decision_owners, list) or not decision_owners or
+                any(not isinstance(owner, str) for owner in decision_owners)):
+            raise Invalid('decision owners must be a non-empty list')
+        decision_owners = list(dict.fromkeys(
+            self._discussion_actor(owner) for owner in decision_owners))
         discussion_id = discussion_id or digest((project_id + document_path + topic_id + now()).encode())[:24]
         stamp = now()
         thread = None
         if self.slack is not None and hasattr(self.slack, 'open_topic'):
-            thread = self.slack.open_topic(discussion_id, document_path, section_anchor, body)
+            thread = self.slack.open_topic(
+                discussion_id, document_path, section_anchor, body,
+                resolve_assignees, decision_owners)
         with self.db:
             self.db.execute('''INSERT INTO discussion_topics
-                (discussion_id,project_id,document_path,section_anchor,topic_id,parent_topic_id,proposal_id,author,body,status,created_at,updated_at,source_refs,slack_channel,slack_thread_ts,reviewer_notified)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (discussion_id,project_id,document_path,section_anchor,topic_id,parent_topic_id,proposal_id,author,body,status,created_at,updated_at,source_refs,slack_channel,slack_thread_ts,reviewer_notified,resolve_assignees,decision_owner,decision_owners)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                             (discussion_id, project_id, document_path, section_anchor, topic_id,
                              parent_topic_id, proposal_id, author, body, status, stamp, stamp,
                              json.dumps(source_refs or []),
                              thread['channel'] if thread else None,
-                             thread['thread_ts'] if thread else None, None))
+                             thread['thread_ts'] if thread else None, None,
+                             json.dumps(resolve_assignees), decision_owners[0],
+                             json.dumps(decision_owners)))
         return discussion_id
 
     def open_concurrent_discussion(self, proposal_id, actor, section_anchor, reason,
@@ -636,10 +730,17 @@ class Worker:
             return self.discussion_topics(topic_id=topic['topic_id'])[0]
 
     def handle_slack_event(self, event, reviewer=None):
-        """Project a Slack thread reply and honor an explicit `close` command."""
+        """Project a Slack reply and forward explicit human decisions.
+
+        An ``app_mention`` containing ``approve`` or ``reject`` records the
+        human's request and forwards it to the configured Slack reviewer. It
+        deliberately does not call :meth:`review`.
+        """
         if not isinstance(event, dict):
             raise Invalid('invalid Slack event')
         message = event.get('message', event)
+        if message.get('bot_id') or message.get('subtype') == 'bot_message':
+            return {'ignored': True}
         channel, thread_ts = message.get('channel'), message.get('thread_ts')
         if not channel or not thread_ts:
             return {'ignored': True}
@@ -650,6 +751,60 @@ class Worker:
         text = (message.get('text') or '').strip()
         actor = message.get('user') or message.get('username') or 'slack-user'
         source_ref = message.get('ts') or message.get('event_ts')
+        if event.get('type') == 'app_mention':
+            if not message.get('user'):
+                return {'ignored': True, 'reason': 'human Slack user required'}
+            command = re.sub(r'^\s*<@[A-Z0-9]+>\s*', '', text, count=1,
+                             flags=re.I).strip()
+            match = re.fullmatch(r'(?:(?:decision|quyết\s+định)\s+)?(approve|reject)'
+                                 r'(?:\s*[:,-]?\s+(.+))?', command,
+                                 flags=re.I | re.S)
+            if match:
+                decision = match.group(1).lower()
+                reason = (match.group(2) or
+                          'No reason provided by the human decision maker').strip()
+                request_id = digest((topic['discussion_id'] + '\0' + (source_ref or '') +
+                                     '\0' + actor + '\0' + decision + '\0' + reason).encode())[:24]
+                inserted = False
+                try:
+                    with self.db:
+                        self.db.execute(
+                            '''INSERT INTO reviewer_decision_requests
+                               (request_id,discussion_id,proposal_id,actor,decision,reason,
+                                source_ref,created_at,forwarded_at)
+                               VALUES(?,?,?,?,?,?,?,?,NULL)''',
+                            (request_id, topic['discussion_id'], topic['proposal_id'], actor,
+                             decision, reason, source_ref, now()))
+                    inserted = True
+                except sqlite3.IntegrityError:
+                    existing = self.db.execute(
+                        '''SELECT request_id,actor,decision,reason,forwarded_at
+                           FROM reviewer_decision_requests
+                           WHERE request_id=? OR (discussion_id=? AND source_ref=?)''',
+                        (request_id, topic['discussion_id'], source_ref)).fetchone()
+                    if existing is None or existing['forwarded_at']:
+                        return {'discussion_id': topic['discussion_id'], 'duplicate': True}
+                    request_id = existing['request_id']
+                    actor, decision, reason = (existing['actor'], existing['decision'],
+                                               existing['reason'])
+                if inserted:
+                    self.add_discussion_comment(
+                        topic['discussion_id'], actor, f'{decision}: {reason}', topic['topic_id'],
+                        topic['section_anchor'], topic['proposal_id'], status='decision',
+                        source_ref=source_ref, mirror=False)
+                thread = {'channel': topic['slack_channel'], 'thread_ts': topic['slack_thread_ts']}
+                if hasattr(self.slack, 'forward_decision'):
+                    self.slack.forward_decision(thread, topic['discussion_id'], actor, decision,
+                                                reason, reviewer, topic['proposal_id'])
+                else:
+                    mention = f'<@{reviewer}> ' if reviewer else ''
+                    self.slack.post(thread, f'{mention}Human decision: {decision}\nReason: {reason}')
+                with self.db:
+                    self.db.execute(
+                        '''UPDATE reviewer_decision_requests SET forwarded_at=?
+                           WHERE request_id=? AND forwarded_at IS NULL''', (now(), request_id))
+                return {'discussion_id': topic['discussion_id'], 'decision': decision,
+                        'forwarded': True, 'proposal_id': topic['proposal_id']}
         if text.lower().startswith('close') or ' close ' in f' {text.lower()} ':
             reason = text.split(None, 1)[1] if len(text.split(None, 1)) == 2 else 'Closed from Slack'
             return self.close_topic(topic['discussion_id'], actor, 'resolved', reason, reviewer)
@@ -809,12 +964,14 @@ class Worker:
                                      row['bundle_hash']))
                     stamp = now()
                     self.db.execute('''INSERT INTO discussion_topics
-                        (discussion_id,project_id,document_path,section_anchor,topic_id,parent_topic_id,proposal_id,author,body,status,created_at,updated_at,source_refs,slack_channel,slack_thread_ts,reviewer_notified)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (discussion_id,project_id,document_path,section_anchor,topic_id,parent_topic_id,proposal_id,author,body,status,created_at,updated_at,source_refs,slack_channel,slack_thread_ts,reviewer_notified,resolve_assignees,decision_owner,decision_owners)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                         (row['id'], None, row['target'], 'proposal', row['id'], None, row['id'],
                          actor, reason, 'open', stamp, stamp, '[]',
                          thread['channel'] if thread and 'channel' in thread else None,
-                         thread['thread_ts'] if thread and 'thread_ts' in thread else None, None))
+                         thread['thread_ts'] if thread and 'thread_ts' in thread else None, None,
+                         json.dumps([row['submitter']]), row['submitter'],
+                         json.dumps([row['submitter']])))
             except sqlite3.IntegrityError as exc:
                 raise Conflict('discussion already exists; reread the discussion') from exc
             return self._workflow_discussion(row)
@@ -1078,6 +1235,7 @@ class Worker:
         for item in result:
             row = self.row(item['id'])
             workflow_discussion = self._workflow_discussion(row)
+            item['reviewer_decision_requests'] = self.reviewer_decision_requests(item['id'])
             item['discussion_hold'] = workflow_discussion['discussion_hold']
             item['disputed'] = bool(item['disputed']) or item['discussion_hold']
             item['conflict'] = self.conflict(row)
@@ -1177,6 +1335,7 @@ class Worker:
             self.integrity(row)
             manifest = parse(row['manifest'])
             return dict(id=row['id'], target=row['target'], submitter=row['submitter'],
+                        reviewer_decision_requests=self.reviewer_decision_requests(ident),
                         state=row['state'], phase=row['phase'], error=row['error'],
                         **self.semantic_discussion(ident),
                         **self._workflow_discussion(row),
@@ -1199,6 +1358,7 @@ class Worker:
             artifact = self._artifact(row, self.reviewer, stamp) if stamp else row['artifact']
             can_review = row['state'] == 'pending' and row['submitter'] != self.reviewer
             return dict(id=row['id'], target=row['target'], submitter=row['submitter'],
+                        reviewer_decision_requests=self.reviewer_decision_requests(ident),
                         state=row['state'], phase=row['phase'], error=row['error'],
                         **self.semantic_discussion(ident),
                         **self._workflow_discussion(row),

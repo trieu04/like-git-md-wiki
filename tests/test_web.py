@@ -13,6 +13,19 @@ from wiki_worker.common import digest
 from wiki_worker.web import Application, Handler
 
 
+class DemoSlack:
+    def __init__(self):
+        self.forwarded = []
+
+    def open_topic(self, discussion_id, document_path, section_anchor, body,
+                   resolve_assignees=None, decision_owners=None):
+        return {'channel': 'C1', 'thread_ts': '100.1'}
+
+    def forward_decision(self, thread, discussion_id, actor, decision, reason,
+                         reviewer=None, proposal_id=None):
+        self.forwarded.append((discussion_id, actor, decision, reason, reviewer, proposal_id))
+
+
 class WebTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -114,6 +127,33 @@ class WebTests(unittest.TestCase):
         _, result = self.request('/api/contribution/contribution-1/publish', 'POST', {})
         self.assertEqual(result['state'], 'published')
         self.assertIn('# Updated', (self.root / 'wiki/index.md').read_text())
+
+    def test_local_demo_accepts_unsigned_slack_decision_without_reviewer_mention(self):
+        slack = DemoSlack()
+        self.server.application.slack = slack
+        self.ingest()
+        worker = self.server.application.worker()
+        try:
+            worker.create_topic('wiki', 'index.md', 'intro', 'topic-1', 'reviewer',
+                                'Human decision needed', proposal_id='contribution-1')
+        finally:
+            self.server.application.close(worker)
+
+        status, result = self.request('/api/slack/events', 'POST', {
+            'event': {'type': 'app_mention', 'channel': 'C1', 'thread_ts': '100.1',
+                      'user': 'Uhuman', 'ts': '100.2',
+                      'text': '<@UBOT> approve source owner confirmed'},
+        })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result['forwarded'])
+        self.assertEqual(result['proposal_id'], 'contribution-1')
+        self.assertEqual(slack.forwarded[-1],
+                         (result['discussion_id'], 'Uhuman', 'approve',
+                          'source owner confirmed', None, 'contribution-1'))
+        _, view = self.request('/api/contribution/contribution-1')
+        self.assertEqual(view['state'], 'pending')
+        self.assertEqual(view['reviewer_decision_requests'][0]['decision'], 'approve')
 
     def test_semantic_discussion_api_holds_and_releases_approval(self):
         self.ingest()

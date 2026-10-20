@@ -16,7 +16,8 @@ class WorkflowTests(unittest.TestCase):
         self.addCleanup(self.remote.db.close)
         self.addCleanup(self.worker.db.close)
 
-    def proposal(self, ident='p1', target='page.md', base=None, content=b'New content\n'):
+    def proposal(self, ident='p1', target='page.md', base=None, content=b'New content\n',
+                 submitter='contributor'):
         folder = self.root / ident
         folder.mkdir()
         if base is not None:
@@ -26,7 +27,7 @@ class WorkflowTests(unittest.TestCase):
                         base_hash=None if base is None else digest(base),
                         proposed_hash=digest(content), reason='Correct documentation', sources=['source'])
         (folder / 'proposal.ready.json').write_text(json.dumps(manifest))
-        self.worker.scan(folder, 'contributor')
+        self.worker.scan(folder, submitter)
         return folder
 
     def approve(self, ident='p1'):
@@ -51,6 +52,30 @@ class WorkflowTests(unittest.TestCase):
         self.approve('p2')
         self.worker.publish('p1')
         self.assertEqual(self.worker.publish('p2'), 'stale')
+
+    def test_related_file_authors_are_advisory_handlers_and_representative(self):
+        self.proposal('policy', target='policy.md', submitter='policy-author')
+        self.proposal('guide', target='guide.md', submitter='guide-author')
+
+        ident = self.worker.create_topic(
+            'wiki', 'policy.md', 'deadline', 'deadline-question', 'facilitator',
+            'Which deadline applies?', source_refs=[{'path': 'guide.md'}],
+            decision_owners=['guide-author', 'policy-author'])
+        topic = self.worker.discussion_topics(topic_id='deadline-question')[0]
+
+        self.assertEqual(topic['resolve_assignees'], ['policy-author', 'guide-author'])
+        self.assertEqual(topic['decision_owners'], ['guide-author', 'policy-author'])
+        # Wiki authors are not Slack identities, so responsibility and the
+        # representative are recorded conventions rather than ACLs.
+        closed = self.worker.close_topic(
+            ident, 'slack-user-123', 'resolved', 'Representative confirmed in thread')
+        self.assertEqual(closed['status'], 'resolved')
+
+        other = self.worker.create_topic(
+            'wiki', 'policy.md', 'scope', 'scope-question', 'facilitator',
+            'Who owns this?', decision_owners=['representative-a', 'representative-b'])
+        self.assertEqual(self.worker.discussion_topics(topic_id='scope-question')[0]
+                         ['decision_owners'], ['representative-a', 'representative-b'])
 
     def test_reviewer_resolves_conflict_from_frozen_base_into_fresh_proposal(self):
         self.remote.write('page.md', b'v1\n', None)

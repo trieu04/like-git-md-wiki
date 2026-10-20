@@ -35,10 +35,19 @@ class SlackDiscussion:
             'text': f'Wiki discussion `{proposal_id}` opened\nBundle: `{bundle_hash}`\n{reason}'})
         return {'channel': result['channel'], 'thread_ts': result['ts']}
 
-    def open_topic(self, discussion_id, document_path, section_anchor, body):
+    def open_topic(self, discussion_id, document_path, section_anchor, body,
+                   resolve_assignees=None, decision_owners=None):
+        authors = ' '.join('@' + author.lstrip('@') for author in (resolve_assignees or []))
+        responsibility = ''
+        if authors:
+            representatives = ' '.join(
+                '@' + owner.lstrip('@') for owner in (decision_owners or []))
+            responsibility = (f'\nExpected handlers (wiki authors, advisory only): {authors}'
+                              f'\nDecision representatives: {representatives}')
         result = self._call('chat.postMessage', {'channel': self.channel,
             'text': (f'Wiki discussion `{discussion_id}` opened\n'
-                     f'File: `{document_path}` · Section: `{section_anchor}`\n{body}')})
+                     f'File: `{document_path}` · Section: `{section_anchor}`'
+                     f'{responsibility}\n{body}')})
         return {'channel': result['channel'], 'thread_ts': result['ts']}
 
     def post(self, thread, text):
@@ -57,6 +66,16 @@ class SlackDiscussion:
     def notify_reviewer(self, thread, discussion_id, reviewer=None):
         mention = f'<@{reviewer}> ' if reviewer else ''
         self.post(thread, f'{mention}Discussion `{discussion_id}` is ready for reviewer decision.')
+
+    def forward_decision(self, thread, discussion_id, actor, decision, reason,
+                         reviewer=None, proposal_id=None):
+        """Forward a human decision request without applying it to a proposal."""
+        mention = f'<@{reviewer}> ' if reviewer else ''
+        proposal = f' for proposal `{proposal_id}`' if proposal_id else ''
+        self.post(
+            thread,
+            f'{mention}Human decision from <@{actor}>{proposal}: *{decision}*\n'
+            f'Discussion: `{discussion_id}`\nReason: {reason}')
 
     @staticmethod
     def verify_signature(signing_secret, timestamp, body, signature, max_age=300):

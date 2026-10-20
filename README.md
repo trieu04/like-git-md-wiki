@@ -43,6 +43,8 @@ The web UI uses HTML, Pico CSS, and AlpineJS and runs on localhost through `wiki
 
 Discussions are durable SQLite records anchored to `project_id`, `document_path`, and `section_anchor`; they are not Markdown wiki content or contribution fields. Create them with `POST /api/discussions`, list/filter with `GET /api/discussions`, and reply with `POST /api/discussions/{id}/comments`.
 
+Each topic records `resolve_assignees` from the contribution authors of its document and related files. Slack threads render them as plain `@author` references, while `decision_owners` names one or more expected representatives. These are coordination hints only: wiki authors are not mapped to Slack identities, so the worker does not authorize replies or closing by comparing the two namespaces. The people mentioned in the thread are implicitly expected to handle it. Callers may supply a list in `decision_owners`; otherwise all related-file authors are representatives. For legacy files with no tracked author, the topic author is the fallback.
+
 Conflict resolution uses `POST /api/contribution/{id}/conflict` with `outcome` `keep_current`, `use_incoming`, or `merge`. The latter two create a new pending contribution against the current v2.
 
 ```text
@@ -54,6 +56,8 @@ POST /api/discussion/{proposalId}/resolve    resolveDiscussion
 ```
 
 Creation accepts `{proposal_id, actor, bundle_hash, reason}`. Messages and holds also require `discussion_version`; a message may include `agrees_with` to reference an earlier sequence. Resolution requires the configured reviewer and a `decision` of `resolved`, `rejected`, or `on_hold`. `resolved` releases the hold; the other outcomes retain it. Review decisions also bind both discussion versions returned by the contribution read. The existing `/api/contribution/{id}/discussion` endpoint remains for backward-compatible reviewer-mediated semantic-conflict records.
+
+For Slack-backed topics, a human can mention the bot in the thread with `approve <reason>` or `reject <reason>`. The signed event is stored as an idempotent `reviewer_decision_request`, forwarded to the configured Slack reviewer, and exposed by the contribution API/UI. It never changes contribution state by itself; the reviewer still performs the explicit review action.
 
 ## Two workflows: contributor and reviewer
 

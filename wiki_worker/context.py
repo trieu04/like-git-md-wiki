@@ -22,6 +22,7 @@ INSTRUCTIONS = {
         'Assess factual support, scope, contradictions and missing context yourself. Current versions or a valid diff do not establish correctness.',
         'If evidence is insufficient, leave pending and report what is missing, or explicitly reject with a reason. Never infer approval from silence.',
         'For a multi-party debate, create a discussion, append messages (optionally agreeing with a prior entry), and let the configured reviewer resolve, reject, or explicitly keep it on hold. No consensus leaves the hold open. The legacy semantic discussion endpoint remains available for reviewer-mediated conflict records.',
+        'If reviewer_decision_requests contains a human approve/reject request forwarded from a bot mention, treat it as explicit human input and cite its actor and reason. It is not an applied review: use the normal review operation yourself, and do not publish automatically.',
         'To decide, POST /api/contribution/ID/review with actor, reason, approve (boolean), and the exact bundle_hash, time, artifact, discussion_version and workflow_discussion_version from the contribution response. The configured reviewer may be an agent distinct from the author.',
         'Publish is a separate explicit POST /api/contribution/ID/publish action under the assigned workflow; the server only enforces state and freshness.',
     ],

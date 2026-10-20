@@ -145,7 +145,12 @@ class Handler(BaseHTTPRequestHandler):
                 raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 slack = self.server.application.slack
                 secret = self.server.application.slack_signing_secret
-                if slack is None or not secret or not slack.verify_signature(secret,
+                if slack is None:
+                    return self.json(HTTPStatus.UNAUTHORIZED, {'error': 'Slack transport is not configured'})
+                # Local demo mode deliberately accepts unsigned events when no
+                # signing secret is configured.  Supplying a secret restores
+                # normal Slack signature verification.
+                if secret and not slack.verify_signature(secret,
                         self.headers.get('X-Slack-Request-Timestamp'), raw,
                         self.headers.get('X-Slack-Signature')):
                     return self.json(HTTPStatus.UNAUTHORIZED, {'error': 'invalid Slack signature'})
@@ -189,7 +194,10 @@ class Handler(BaseHTTPRequestHandler):
                 ident = worker.create_topic(data['project_id'], data['document_path'], data['section_anchor'],
                                             data['topic_id'], data['author'], data['body'],
                                             data.get('parent_topic_id'), data.get('proposal_id'),
-                                            data.get('source_refs'), data.get('status', 'open'), data.get('discussion_id'))
+                                            data.get('source_refs'), data.get('status', 'open'),
+                                            data.get('discussion_id'),
+                                            data.get('decision_owners') or
+                                            ([data['decision_owner']] if data.get('decision_owner') else None))
                 return self.json(HTTPStatus.CREATED, {'discussion_id': ident})
             if route == '/api/contribution/import':
                 if not isinstance(data.get('file'), str) or not isinstance(data.get('submitter'), str) or not data['submitter'].strip():
