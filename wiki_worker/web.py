@@ -11,13 +11,17 @@ from .fixture import FixtureRemote
 from .local import LocalFolderStorage
 from .skill import describe, skill_file
 from .slack import SlackError
+from .teams import TeamsError
 
 
 class Application:
-    def __init__(self, state, folder, fixture, reviewer, owner, slack=None, slack_signing_secret=None, slack_reviewer=None):
+    def __init__(self, state, folder, fixture, reviewer, owner, slack=None,
+                 slack_signing_secret=None, slack_reviewer=None,
+                 teams_client_state=None, teams_reviewer=None):
         self.state, self.folder, self.fixture = state, folder, fixture
         self.reviewer, self.owner, self.slack = reviewer, owner, slack
         self.slack_signing_secret, self.slack_reviewer = slack_signing_secret, slack_reviewer
+        self.teams_client_state, self.teams_reviewer = teams_client_state, teams_reviewer
         self.index = files('wiki_worker').joinpath('static/index.html').read_bytes()
 
     def worker(self):
@@ -38,6 +42,15 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def text(self, status, value):
+        payload = value.encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Length', str(len(payload)))
         self.send_header('Cache-Control', 'no-store')
         self.end_headers()
@@ -130,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[:2] == ['api', 'discussion']:
                 return self.json(HTTPStatus.OK, worker.get_discussion(unquote(parts[2])))
             self.json(HTTPStatus.NOT_FOUND, {'error': 'route not found'})
-        except (Invalid, Conflict, SlackError, UnicodeError, ValueError) as exc:
+        except (Invalid, Conflict, SlackError, TeamsError, UnicodeError, ValueError) as exc:
             self.json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
         finally:
             if worker is not None:
@@ -141,6 +154,34 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = urlsplit(self.path).path
             parts = route.strip('/').split('/')
+            if route == '/api/teams/events':
+                query = parse_qs(urlsplit(self.path).query)
+                validation_token = query.get('validationToken', [None])[0]
+                if validation_token is not None:
+                    return self.text(HTTPStatus.OK, validation_token)
+                teams = self.server.application.slack
+                client_state = self.server.application.teams_client_state
+                if teams is None or not hasattr(teams, 'notification_message'):
+                    return self.json(HTTPStatus.UNAUTHORIZED,
+                                     {'error': 'Teams transport is not configured'})
+                if not client_state:
+                    return self.json(HTTPStatus.UNAUTHORIZED,
+                                     {'error': 'Teams client state is not configured'})
+                data = self.body()
+                notifications = data.get('value')
+                if not isinstance(notifications, list):
+                    raise Invalid('Teams notification value must be a list')
+                worker = self.server.application.worker()
+                results, ignored = [], 0
+                for notification in notifications:
+                    if not teams.verify_notification(client_state, notification):
+                        ignored += 1
+                        continue
+                    results.append(worker.handle_teams_event(
+                        notification, self.server.application.teams_reviewer))
+                return self.json(HTTPStatus.ACCEPTED,
+                                 {'accepted': len(results), 'ignored': ignored,
+                                  'results': results})
             if route == '/api/slack/events':
                 raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 slack = self.server.application.slack
@@ -164,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                 (len(parts) == 4 and parts[:2] == ['api', 'discussion'] and
                  parts[3] in ('messages', 'resolve', 'hold', 'sync')) or
                 (len(parts) == 4 and parts[:2] == ['api', 'discussions'] and parts[3] in ('comments', 'close')) or
-                route == '/api/slack/events')
+                route in ('/api/slack/events', '/api/teams/events'))
             if (route != '/api/contribution/import' and not discussion_route and not
                     (len(parts) == 4 and parts[:2] == ['api', 'contribution'] and
                      parts[3] in ('review', 'publish', 'discussion', 'conflict', 'concurrent-discussion', 'rollback'))):
@@ -214,7 +255,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ['api', 'discussion']:
                 ident = unquote(parts[2])
                 if parts[3] == 'sync':
-                    sync = worker.sync_discord_discussion if worker.slack.__class__.__name__ == 'DiscordDiscussion' else worker.sync_slack_discussion
+                    if worker.slack.__class__.__name__ == 'DiscordDiscussion':
+                        sync = worker.sync_discord_discussion
+                    elif worker.slack.__class__.__name__ == 'TeamsDiscussion':
+                        sync = worker.sync_teams_discussion
+                    else:
+                        sync = worker.sync_slack_discussion
                     return self.json(HTTPStatus.OK, sync(ident))
                 required = ('actor', 'bundle_hash', 'discussion_version')
                 if (any(key not in data for key in required) or
@@ -280,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                 worker.review(ident, data['actor'], preview, data['approve'], data['reason'])
                 return self.json(HTTPStatus.OK, {'state': 'approved' if data['approve'] else 'rejected'})
             return self.json(HTTPStatus.OK, {'state': worker.publish(ident)})
-        except (Invalid, Conflict, SlackError, UnicodeError) as exc:
+        except (Invalid, Conflict, SlackError, TeamsError, UnicodeError) as exc:
             self.json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
         finally:
             if worker is not None:
@@ -291,12 +337,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host, port, state, folder, fixture, reviewer, owner, slack=None,
-          slack_signing_secret=None, slack_reviewer=None):
+          slack_signing_secret=None, slack_reviewer=None,
+          teams_client_state=None, teams_reviewer=None):
     if host not in ('127.0.0.1', '::1', 'localhost'):
         raise Invalid('web UI currently binds to localhost only; authentication is not implemented')
     server = ThreadingHTTPServer((host, port), Handler)
     server.application = Application(state, folder, fixture, reviewer, owner, slack,
-                                     slack_signing_secret, slack_reviewer)
+                                     slack_signing_secret, slack_reviewer,
+                                     teams_client_state, teams_reviewer)
     print(f'Wiki UI: http://{host}:{server.server_port}')
     try:
         server.serve_forever()

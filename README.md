@@ -57,7 +57,7 @@ POST /api/discussion/{proposalId}/resolve    resolveDiscussion
 
 Creation accepts `{proposal_id, actor, bundle_hash, reason}`. Messages and holds also require `discussion_version`; a message may include `agrees_with` to reference an earlier sequence. Resolution requires the configured reviewer and a `decision` of `resolved`, `rejected`, or `on_hold`. `resolved` releases the hold; the other outcomes retain it. Review decisions also bind both discussion versions returned by the contribution read. The existing `/api/contribution/{id}/discussion` endpoint remains for backward-compatible reviewer-mediated semantic-conflict records.
 
-For Slack-backed topics, a human can mention the bot in the thread with `approve <reason>` or `reject <reason>`. The signed event is stored as an idempotent `reviewer_decision_request`, forwarded to the configured Slack reviewer, and exposed by the contribution API/UI. It never changes contribution state by itself; the reviewer still performs the explicit review action.
+For Slack-backed topics, a human can mention the bot in the thread with `approve <reason>` or `reject <reason>`. The signed event is stored as an idempotent `reviewer_decision_request`, forwarded to the configured Slack reviewer, and exposed by the contribution API/UI. Microsoft Teams channel threads support the same handoff through Microsoft Graph change notifications. Neither transport changes contribution state by itself; the reviewer still performs the explicit review action. See [Slack integration](docs/slack-discussions.md) and [Microsoft Teams integration](docs/teams-discussions.md).
 
 ### Discussion MCP server
 

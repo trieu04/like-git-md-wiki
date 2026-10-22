@@ -729,7 +729,7 @@ class Worker:
                         self.db.execute('UPDATE discussion_topics SET reviewer_notified=? WHERE discussion_id=?', (now(), discussion_id))
             return self.discussion_topics(topic_id=topic['topic_id'])[0]
 
-    def handle_slack_event(self, event, reviewer=None):
+    def handle_slack_event(self, event, reviewer=None, _source='Slack'):
         """Project a Slack reply and forward explicit human decisions.
 
         An ``app_mention`` containing ``approve`` or ``reject`` records the
@@ -806,12 +806,28 @@ class Worker:
                 return {'discussion_id': topic['discussion_id'], 'decision': decision,
                         'forwarded': True, 'proposal_id': topic['proposal_id']}
         if text.lower().startswith('close') or ' close ' in f' {text.lower()} ':
-            reason = text.split(None, 1)[1] if len(text.split(None, 1)) == 2 else 'Closed from Slack'
+            reason = (text.split(None, 1)[1] if len(text.split(None, 1)) == 2
+                      else f'Closed from {_source}')
             return self.close_topic(topic['discussion_id'], actor, 'resolved', reason, reviewer)
         self.add_discussion_comment(topic['discussion_id'], actor, text, topic['topic_id'],
                                     topic['section_anchor'], topic['proposal_id'],
                                     source_ref=source_ref, mirror=False)
         return {'discussion_id': topic['discussion_id'], 'received': True}
+
+    def handle_teams_event(self, notification, reviewer=None):
+        """Project one Microsoft Graph Teams notification into a discussion.
+
+        The Teams adapter normalizes channel replies to the event shape used by
+        the existing idempotent discussion ingestion path. A human reply may
+        use ``approve <reason>`` or ``reject <reason>`` without a bot mention;
+        as with Slack, this only forwards a request and never performs review.
+        """
+        if self.slack is None or not hasattr(self.slack, 'notification_message'):
+            raise Invalid('Teams discussion transport is not configured')
+        event = self.slack.notification_message(notification)
+        if event is None:
+            return {'ignored': True}
+        return self.handle_slack_event(event, reviewer, _source='Teams')
 
     def add_discussion_comment(self, discussion_id, author, body, topic_id=None,
                                section_anchor=None, proposal_id=None, parent_comment_id=None,
@@ -899,6 +915,12 @@ class Worker:
                                     (ident, sequence, actor, message.get('timestamp', now()), 'message', text, None, None, row['bundle_hash']))
                     self.db.execute('UPDATE discussions SET version=? WHERE proposal_id=?', (sequence, ident))
             return self._workflow_discussion(row)
+
+    def sync_teams_discussion(self, ident):
+        """Import Teams replies using the shared channel-thread projection."""
+        if self.slack is None or not hasattr(self.slack, 'notification_message'):
+            raise Invalid('Teams discussion transport is not configured')
+        return self.sync_slack_discussion(ident)
 
     def _current_discussion(self, ident, bundle_hash, version):
         row = self.row(ident)

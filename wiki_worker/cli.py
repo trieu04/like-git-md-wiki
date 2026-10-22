@@ -7,6 +7,7 @@ from .common import Conflict, Invalid, read_file, target_path
 from .core import Worker
 from .fixture import FixtureRemote
 from .local import LocalFolderStorage
+from .teams import TeamsError
 from .web import serve
 
 
@@ -22,6 +23,11 @@ def main():
     parser.add_argument('--slack-channel', help='Slack channel ID for discussion threads')
     parser.add_argument('--slack-signing-secret', help='Slack Events API signing secret')
     parser.add_argument('--slack-reviewer', help='Slack user ID to mention when a discussion is explicitly closed')
+    parser.add_argument('--teams-token', help='Microsoft Graph access token (discussion transport)')
+    parser.add_argument('--teams-team', help='Microsoft Teams team ID')
+    parser.add_argument('--teams-channel', help='Microsoft Teams channel ID')
+    parser.add_argument('--teams-client-state', help='secret clientState for Graph change notifications')
+    parser.add_argument('--teams-reviewer', help='Microsoft Entra user object ID to mention on close/decision')
     parser.add_argument('--discord-token', help='Optional Discord bot token')
     parser.add_argument('--discord-channel', help='Optional Discord channel ID')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -59,7 +65,8 @@ def main():
     publish = sub.add_parser('publish')
     publish.add_argument('id')
     sub.add_parser('status')
-    sync = sub.add_parser('slack-sync', aliases=['discord-sync'], help='collect replies into the canonical discussion store')
+    sync = sub.add_parser('slack-sync', aliases=['discord-sync', 'teams-sync'],
+                          help='collect transport replies into the canonical discussion store')
     sync.add_argument('id')
     resolve = sub.add_parser('resolve')
     resolve.add_argument('id')
@@ -83,12 +90,22 @@ def main():
             raise Invalid('fixture commands require --fixture')
         remote = LocalFolderStorage(args.folder) if args.folder else FixtureRemote(args.fixture)
         transport = None
-        if args.slack_token or args.slack_channel:
+        slack_requested = bool(args.slack_token or args.slack_channel)
+        teams_requested = bool(args.teams_token or args.teams_team or args.teams_channel)
+        discord_requested = bool(args.discord_token or args.discord_channel)
+        if sum((slack_requested, teams_requested, discord_requested)) > 1:
+            raise Invalid('configure only one discussion transport')
+        if slack_requested:
             if not args.slack_token or not args.slack_channel:
                 raise Invalid('--slack-token and --slack-channel must be used together')
             from .slack import SlackDiscussion
             transport = SlackDiscussion(args.slack_token, args.slack_channel)
-        elif args.discord_token or args.discord_channel:
+        elif teams_requested:
+            if not args.teams_token or not args.teams_team or not args.teams_channel:
+                raise Invalid('--teams-token, --teams-team and --teams-channel must be used together')
+            from .teams import TeamsDiscussion
+            transport = TeamsDiscussion(args.teams_token, args.teams_team, args.teams_channel)
+        elif discord_requested:
             if not args.discord_token or not args.discord_channel:
                 raise Invalid('--discord-token and --discord-channel must be used together')
             from .discord import DiscordDiscussion
@@ -145,8 +162,13 @@ def main():
             print(worker.publish(args.id))
         elif args.command == 'status':
             print(json.dumps(worker.status(), indent=2))
-        elif args.command in ('discord-sync', 'slack-sync'):
-            method = worker.sync_discord_discussion if args.command == 'discord-sync' else worker.sync_slack_discussion
+        elif args.command in ('discord-sync', 'slack-sync', 'teams-sync'):
+            if args.command == 'discord-sync':
+                method = worker.sync_discord_discussion
+            elif args.command == 'teams-sync':
+                method = worker.sync_teams_discussion
+            else:
+                method = worker.sync_slack_discussion
             print(json.dumps(method(args.id), ensure_ascii=False))
         elif args.command == 'resolve':
             worker.resolve(args.id, args.actor, args.outcome, args.evidence, args.receipt)
@@ -165,11 +187,12 @@ def main():
             worker.db.close()
             serve(args.host, args.port, args.state, args.folder, args.fixture,
                   args.reviewer, args.owner, transport, args.slack_signing_secret,
-                  args.slack_reviewer)
+                  args.slack_reviewer, args.teams_client_state,
+                  args.teams_reviewer)
         elif args.command == 'mcp':
             from .mcp import serve as serve_mcp
             serve_mcp(worker)
-    except (Invalid, Conflict, OSError, EOFError) as exc:
+    except (Invalid, Conflict, TeamsError, OSError, EOFError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
 
