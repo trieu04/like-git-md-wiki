@@ -76,6 +76,7 @@ def main():
     web = sub.add_parser('web', help='serve the local web UI')
     web.add_argument('--host', default='127.0.0.1')
     web.add_argument('--port', default=8080, type=int)
+    sub.add_parser('mcp', help='serve discussion tools over MCP stdio')
     args = parser.parse_args()
     try:
         if args.command.startswith('fixture-') and not args.fixture:
@@ -165,6 +166,9 @@ def main():
             serve(args.host, args.port, args.state, args.folder, args.fixture,
                   args.reviewer, args.owner, transport, args.slack_signing_secret,
                   args.slack_reviewer)
+        elif args.command == 'mcp':
+            from .mcp import serve as serve_mcp
+            serve_mcp(worker)
     except (Invalid, Conflict, OSError, EOFError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None

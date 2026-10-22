@@ -59,6 +59,41 @@ Creation accepts `{proposal_id, actor, bundle_hash, reason}`. Messages and holds
 
 For Slack-backed topics, a human can mention the bot in the thread with `approve <reason>` or `reject <reason>`. The signed event is stored as an idempotent `reviewer_decision_request`, forwarded to the configured Slack reviewer, and exposed by the contribution API/UI. It never changes contribution state by itself; the reviewer still performs the explicit review action.
 
+### Discussion MCP server
+
+Run the dependency-free stdio MCP server with the same worker state and storage configuration:
+
+```sh
+python -m wiki_worker.cli --state .wiki-worker --folder wiki-en --reviewer reviewer-agent mcp
+```
+
+An MCP client configuration can launch it directly:
+
+```json
+{
+  "mcpServers": {
+    "wiki-discussions": {
+      "command": "python",
+      "args": [
+        "-m", "wiki_worker.cli",
+        "--state", "/absolute/path/to/.wiki-worker",
+        "--folder", "/absolute/path/to/wiki-en",
+        "--reviewer", "reviewer-agent",
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+The server exposes file/section topic tools (`discussion_list`, `discussion_create`,
+`discussion_comment`, `discussion_close`) and frozen-proposal workflow tools
+(`proposal_discussion_get`, `proposal_discussion_create`,
+`proposal_discussion_message`, `proposal_discussion_hold`,
+`proposal_discussion_resolve`). The workflow tools preserve bundle binding,
+optimistic `discussion_version` checks and configured-reviewer authorization.
+Closing a topic does not approve or publish a contribution.
+
 ## Two workflows: contributor and reviewer
 
 **Contributing — agent skill.** Agents discover and search files directly, obtain versions with `context`, read the sources, and create a `.contribution.md` file. They do not submit content through an HTTP API. See the [contribution convention](skills/wiki-knowledge-workflow/references/contribution.md).
